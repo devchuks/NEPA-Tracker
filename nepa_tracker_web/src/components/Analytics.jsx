@@ -207,7 +207,8 @@ export default function Analytics({ darkMode }) {
                     {point.level === 1 ? point.status : 'OUTAGE'}
                   </span>
                   <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400 mt-1">
-                    {point.time} - {chartTrendData[i + 1].time}
+                    {new Date(point.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })} - 
+  {new Date(chartTrendData[i + 1].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
                   </span>
                 </div>
               </div>
@@ -238,7 +239,8 @@ export default function Analytics({ darkMode }) {
             }
 
             const topOffset = assignedTier * 20;
-            const displayTime = (isLast && isToday) ? "NOW" : point.time;
+            const displayTime = (isLast && isToday) ? "NOW" : 
+  new Date(point.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 
             return (
               <div key={`time-${i}`} className="absolute hover:z-20 transition-all" style={{ left: `${leftPercent}%`, top: `${topOffset}px` }}>

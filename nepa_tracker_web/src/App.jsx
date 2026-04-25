@@ -328,13 +328,15 @@ function App() {
                             </div>
 
                             <div className="text-right pl-2 shrink-0">
-                              <p className={`text-xl sm:text-2xl font-black tracking-tighter ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                                {new Date(log.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
-                              </p>
-                              <p className="text-slate-400 dark:text-slate-600 text-[10px] font-mono font-bold mt-[-2px]">
-                                :{String(new Date(log.timestamp).getSeconds()).padStart(2, '0')}s
-                              </p>
-                            </div>
+  <p className={`text-xl sm:text-2xl font-black tracking-tighter ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+    {/* We add 'Z' to tell the browser this string is UTC, so it adds +1 hour for Lagos */}
+    {new Date(log.timestamp + (log.timestamp.endsWith('Z') ? '' : 'Z'))
+      .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+  </p>
+  <p className="text-slate-400 dark:text-slate-600 text-[10px] font-mono font-bold mt-[-2px]">
+    :{String(new Date(log.timestamp + (log.timestamp.endsWith('Z') ? '' : 'Z')).getSeconds()).padStart(2, '0')}s
+  </p>
+</div>
                             
                           </div>
                         );
