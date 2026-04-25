@@ -13,7 +13,7 @@ This project bridges hardware and the cloud using a modern, decoupled stack:
 ## ⚙️ How It Works (The Dead Man's Switch)
 Rather than relying on a microcontroller to send a "Power Off" signal (which is unreliable when power is lost), this system uses a Dead Man's Switch architecture:
 1.  **The Heartbeat:** An ESP32 plugged directly into a wall outlet sends a continuous "ping" to the FastAPI backend every 60 seconds.
-2.  **The Trigger:** If the backend fails to receive a ping within a 120-second tolerance window, the server actively assumes a power outage.
+2.  **The Trigger:** If the backend fails to receive a ping within that ~60-second window, the server actively assumes a power outage.
 3.  **The Action:** The server logs the exact estimated time of death to the database, switches the live dashboard state to "OFF", and pushes an outage alert to Telegram. 
 4.  **Source Logging:** When power returns, the system logs the restoration and allows for manual or automated overrides to specify the source (Grid vs. Generator).
 
