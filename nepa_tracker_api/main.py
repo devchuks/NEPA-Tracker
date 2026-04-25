@@ -41,7 +41,11 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://nepa_tracker.netlify.app"],
+    allow_origins=[
+        "http://localhost:5173",               # Keeps your local testing working
+        "https://nepa-tracker.netlify.app"     # Allows your live Netlify frontend
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
