@@ -1,0 +1,9 @@
+# API Ignores
+nepa_tracker_api/.env
+nepa_tracker_api/nepa.db
+nepa_tracker_api/__pycache__/
+nepa_tracker_api/venv/
+
+# Web Ignores
+nepa_tracker_web/node_modules/
+nepa_tracker_web/dist/

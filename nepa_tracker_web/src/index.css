@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* Activates dark mode whenever it sees the .dark class */
+@variant dark (&:where(.dark, .dark *));
+
+body {
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  padding: 0;
+}
