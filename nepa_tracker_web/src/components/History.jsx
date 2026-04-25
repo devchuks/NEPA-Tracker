@@ -53,7 +53,7 @@ export default function History({ darkMode }) {
         id: null,
         event: 'ON',
         source: 'NEPA',
-        timestamp: toLocalIsoString(new Date())
+        timestamp: toLocalIsoString(new Date().toISOString())
       });
     }
     setIsModalOpen(true);
