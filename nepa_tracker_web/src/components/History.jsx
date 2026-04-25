@@ -33,10 +33,11 @@ export default function History({ darkMode }) {
 
   // --- FORMATTING HELPERS ---
   const toLocalIsoString = (dateString) => {
-    const d = new Date(dateString);
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  };
+  const d = new Date(dateString.endsWith('Z') ? dateString : dateString + 'Z');
+  const pad = (n) => String(n).padStart(2, '0');
+  // Returns the format YYYY-MM-DDTHH:mm:ss required by the browser input
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
 
   // --- CRUD ACTIONS ---
   const openModal = (log = null) => {
@@ -165,11 +166,13 @@ export default function History({ darkMode }) {
               <div className="flex sm:col-span-3 justify-between sm:justify-start sm:flex-col items-center sm:items-start pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800/50">
                 <div className="flex flex-col">
                   <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    {new Date(log.timestamp).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
-                  </span>
-                  <span className="text-[10px] font-mono font-medium text-slate-400 dark:text-slate-500 mt-0 sm:mt-0.5 uppercase">
-                    {new Date(log.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}
-                  </span>
+  {new Date(log.timestamp + (log.timestamp.endsWith('Z') ? '' : 'Z'))
+    .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+</span>
+<span className="text-[10px] font-mono font-medium text-slate-400 dark:text-slate-500 mt-0 sm:mt-0.5 uppercase">
+  {new Date(log.timestamp + (log.timestamp.endsWith('Z') ? '' : 'Z'))
+    .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}
+</span>
                 </div>
               </div>
 

@@ -171,58 +171,75 @@ export default function Analytics({ darkMode }) {
   
   const inputDateString = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth()+1).padStart(2,'0')}-${String(selectedDate.getDate()).padStart(2,'0')}`;
 
-  const renderDayTrace = () => (
+  const renderDayTrace = () => {
+  // 1. Establish local midnight as the absolute 0% mark for the day
+  const localMidnight = new Date(viewDate).setHours(0, 0, 0, 0);
+
+  return (
     <div className="w-full h-full flex flex-col justify-center px-2">
-      <div className="relative w-full h-24 sm:h-32 overflow-visible bg-slate-50 dark:bg-slate-900 shadow-inner flex border border-slate-200 dark:border-slate-800 z-20">
+      {/* Container must be relative so children can be absolute */}
+      <div className="relative w-full h-24 sm:h-32 overflow-visible bg-slate-50 dark:bg-slate-900 shadow-inner border border-slate-200 dark:border-slate-800 z-20">
         {chartTrendData.map((point, i) => {
-          if (i === chartTrendData.length - 1) return null; 
+          if (i === chartTrendData.length - 1) return null;
+
+          // 2. Calculate local duration and position relative to midnight
           const durationMs = chartTrendData[i + 1].timestamp - point.timestamp;
-          const bgColor = point.level === 1 ? (point.status === "NEPA" ? "bg-[#10b981]" : "bg-[#f59e0b]") : "bg-transparent";
+          const leftPercent = ((point.timestamp - localMidnight) / DAY_MS) * 100;
+          const widthPercent = (durationMs / DAY_MS) * 100;
+
+          const bgColor = point.level === 1 
+            ? (point.status === "NEPA" ? "bg-[#10b981]" : "bg-[#f59e0b]") 
+            : "bg-transparent";
 
           return (
-            <div 
-              key={i} 
-              className={`h-full ${bgColor} relative group hover:brightness-110 transition-all border-r border-black/10 dark:border-white/5 last:border-0 cursor-pointer`}
-              style={{ width: `${(durationMs / DAY_MS) * 100}%` }}
+            <div
+              key={i}
+              className={`h-full ${bgColor} absolute group hover:brightness-110 transition-all border-r border-black/10 dark:border-white/5 last:border-0 cursor-pointer`}
+              style={{ 
+                left: `${leftPercent}%`, 
+                width: `${widthPercent}%` 
+              }}
             >
+              {/* Tooltip logic remains the same */}
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 whitespace-nowrap">
-                 <div className="backdrop-blur-md p-2 lg:p-3 rounded shadow-2xl border bg-white/95 dark:bg-slate-950/95 border-slate-200 dark:border-slate-800 flex flex-col items-center">
-                   <span className={`text-[10px] font-black uppercase tracking-widest ${point.level === 1 ? (point.status === 'NEPA' ? 'text-emerald-500' : 'text-amber-500') : 'text-slate-400'}`}>
-                     {point.level === 1 ? point.status : 'OUTAGE'}
-                   </span>
-                   <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400 mt-1">{point.time} - {chartTrendData[i + 1].time}</span>
-                 </div>
+                <div className="backdrop-blur-md p-2 lg:p-3 rounded shadow-2xl border bg-white/95 dark:bg-slate-950/95 border-slate-200 dark:border-slate-800 flex flex-col items-center">
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${point.level === 1 ? (point.status === 'NEPA' ? 'text-emerald-500' : 'text-amber-500') : 'text-slate-400'}`}>
+                    {point.level === 1 ? point.status : 'OUTAGE'}
+                  </span>
+                  <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400 mt-1">
+                    {point.time} - {chartTrendData[i + 1].time}
+                  </span>
+                </div>
               </div>
             </div>
           );
         })}
       </div>
-      
+
+      {/* TIMELINE LABELS */}
       <div className="relative w-full h-24 mt-3 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest z-10">
         {(() => {
-          const startOfDay = chartTrendData[0]?.timestamp;
-          if (!startOfDay) return null;
-          
-          const tiers = [-20, -20, -20]; 
-          const MIN_DIST = 10; 
+          const tiers = [-20, -20, -20];
+          const MIN_DIST = 10;
           const isToday = new Date(viewDate).toDateString() === new Date().toDateString();
-          
+
           const labels = chartTrendData.map((point, i) => {
-            const leftPercent = ((point.timestamp - startOfDay) / DAY_MS) * 100;
+            // 3. Labels also need to be positioned relative to local midnight
+            const leftPercent = ((point.timestamp - localMidnight) / DAY_MS) * 100;
             const isLast = i === chartTrendData.length - 1;
             let assignedTier = 0;
-            
+
             if (i === 0 || (isLast && !isToday)) {
               assignedTier = 3;
             } else {
               for (let t = 0; t < 3; t++) if (leftPercent - tiers[t] > MIN_DIST) { assignedTier = t; break; }
-              if (assignedTier === 0 && leftPercent - tiers[0] <= MIN_DIST) assignedTier = (i % 3); 
+              if (assignedTier === 0 && leftPercent - tiers[0] <= MIN_DIST) assignedTier = (i % 3);
               tiers[assignedTier] = leftPercent;
             }
-            
-            const topOffset = assignedTier * 20; 
+
+            const topOffset = assignedTier * 20;
             const displayTime = (isLast && isToday) ? "NOW" : point.time;
-            
+
             return (
               <div key={`time-${i}`} className="absolute hover:z-20 transition-all" style={{ left: `${leftPercent}%`, top: `${topOffset}px` }}>
                 <div className="absolute left-0 -translate-x-1/2 bottom-full mb-0.5 w-px bg-slate-300 dark:bg-slate-700 -z-10" style={{ height: `${topOffset + 4}px` }} />
@@ -235,6 +252,7 @@ export default function Analytics({ darkMode }) {
             );
           });
 
+          // 11:59 PM marker stays at 100%
           if (isToday) {
             labels.push(
               <div key="time-end-today" className="absolute hover:z-20 transition-all" style={{ left: `100%`, top: `60px` }}>
@@ -250,6 +268,7 @@ export default function Analytics({ darkMode }) {
       </div>
     </div>
   );
+};
 
   const renderMonthHeatmap = () => {
     const viewYear = viewDate.getFullYear();

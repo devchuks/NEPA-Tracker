@@ -7,7 +7,7 @@ import History from './components/History'
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const formatFullDate = (timestamp) => {
-  const date = new Date(timestamp);
+  const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
   const day = date.getDate();
   const month = date.toLocaleDateString('en-US', { month: 'long' });
   const year = date.getFullYear();
@@ -143,8 +143,9 @@ function App() {
   const todayLogsCount = logs.filter(l => new Date(l.timestamp).toDateString() === new Date().toDateString()).length;
   
   const lastUpdate = logs.length > 0 
-    ? new Date(logs[0].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
-    : '--:--';
+  ? new Date(logs[0].timestamp + (logs[0].timestamp.endsWith('Z') ? '' : 'Z'))
+      .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
+  : '--:--';
 
   return (
     <div className={darkMode ? 'dark' : ''}>
