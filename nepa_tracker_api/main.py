@@ -39,7 +39,12 @@ class PowerLog(Base):
 Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "https://nepa_tracker.netlify.app"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db():
     db = SessionLocal()
