@@ -143,9 +143,8 @@ function App() {
   const todayLogsCount = logs.filter(l => new Date(l.timestamp).toDateString() === new Date().toDateString()).length;
   
   const lastUpdate = logs.length > 0 
-  ? new Date(logs[0].timestamp + (logs[0].timestamp.endsWith('Z') ? '' : 'Z'))
-      .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
-  : '--:--';
+    ? new Date(logs[0].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
+    : '--:--';
 
   return (
     <div className={darkMode ? 'dark' : ''}>
