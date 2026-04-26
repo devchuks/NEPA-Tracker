@@ -1,4 +1,7 @@
 import os
+import asyncio
+import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, BackgroundTasks
 from sqlalchemy import create_engine, Column, Integer, DateTime, String, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -9,14 +12,11 @@ from pydantic import BaseModel
 from typing import Optional
 import calendar
 from calendar import monthrange
-import io
-import csv
 
 from telegram_service import send_telegram_alert
 from export_service import generate_nepa_csv
 
 # --- DATABASE SETUP ---
-# Uses live PostgreSQL if available, falls back to local SQLite
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nepa.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -37,23 +37,118 @@ class PowerLog(Base):
     timestamp = Column(DateTime, default=datetime.now)
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",               # Keeps your local testing working
-        "https://nepa-tracker.netlify.app"     # Allows your live Netlify frontend
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 def get_db():
     db = SessionLocal()
     try: yield db
     finally: db.close()
+
+# --- EVENT BUS ARCHITECTURE ---
+class EventBus:
+    """Lightweight Pub/Sub system to decouple HTTP from Business Logic"""
+    def __init__(self):
+        self._subscribers = {}
+
+    def subscribe(self, event_type: str, handler):
+        if event_type not in self._subscribers:
+            self._subscribers[event_type] = []
+        self._subscribers[event_type].append(handler)
+
+    def emit(self, event_type: str, *args, **kwargs):
+        # Run handlers in background threads to prevent blocking the FastAPI event loop
+        for handler in self._subscribers.get(event_type, []):
+            threading.Thread(target=handler, args=args, kwargs=kwargs).start()
+
+bus = EventBus()
+
+# --- ASYNC WATCHDOG TIMER ---
+class WatchdogTimer:
+    """Autonomous internal timer that detects outages without external cron jobs"""
+    def __init__(self, timeout=65):
+        self.timeout = timeout
+        self.task = None
+
+    async def _countdown(self, last_ping_time: datetime):
+        await asyncio.sleep(self.timeout)
+        # If this sleep finishes without being cancelled, the ESP32 died
+        death_time = last_ping_time + timedelta(seconds=self.timeout)
+        bus.emit("POWER_LOST", death_time)
+
+    def reset(self, ping_time: datetime):
+        if self.task and not self.task.done():
+            self.task.cancel()
+        self.task = asyncio.create_task(self._countdown(ping_time))
+
+watchdog = WatchdogTimer()
+
+# --- EVENT HANDLERS (BUSINESS LOGIC) ---
+def handle_ping(timestamp: datetime):
+    with SessionLocal() as db:
+        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        if not status:
+            status = PowerStatus(id=1, last_ping=timestamp, is_online=True, source="NEPA")
+            db.add(status)
+            db.add(PowerLog(event="ON", source="NEPA", timestamp=timestamp))
+            send_telegram_alert("⚡ Power restored via NEPA!")
+        else:
+            status.last_ping = timestamp
+            if not status.is_online:
+                status.is_online = True
+                db.add(PowerLog(event="ON", source=status.source, timestamp=timestamp))
+                send_telegram_alert(f"⚡ Power restored via {status.source}!")
+        db.commit()
+
+def handle_power_lost(death_time: datetime):
+    with SessionLocal() as db:
+        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        if status and status.is_online:
+            status.is_online = False
+            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
+            db.commit()
+            send_telegram_alert(f"⚠️ ALERT: Power lost at {death_time.strftime('%I:%M %p')}")
+
+def handle_source_change(new_source: str):
+    with SessionLocal() as db:
+        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        if status:
+            status.source = new_source
+            
+        last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
+        if last_log and last_log.event == "ON":
+            last_log.source = new_source
+            
+        db.commit()
+
+# Register Handlers to the Event Bus
+bus.subscribe("PING_RECEIVED", handle_ping)
+bus.subscribe("POWER_LOST", handle_power_lost)
+bus.subscribe("SOURCE_CHANGED", handle_source_change)
+
+# --- FASTAPI LIFESPAN & APP SETUP ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On Startup: Check if server died mid-cycle and start watchdog if online
+    with SessionLocal() as db:
+        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        if status and status.is_online:
+            elapsed = (datetime.now() - status.last_ping).total_seconds()
+            if elapsed > watchdog.timeout:
+                bus.emit("POWER_LOST", status.last_ping + timedelta(seconds=watchdog.timeout))
+            else:
+                watchdog.reset(status.last_ping)
+    yield
+    # On Shutdown: Cancel any pending watchdog tasks
+    if watchdog.task: watchdog.task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "https://nepa-tracker.netlify.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- PYDANTIC SCHEMAS ---
 class SourceToggle(BaseModel):
@@ -64,82 +159,34 @@ class LogEntry(BaseModel):
     source: Optional[str] = None
     timestamp: datetime
 
-# --- ENDPOINTS ---
-
-@app.post("/api/source")
-def toggle_source(data: SourceToggle, db: Session = Depends(get_db)):
-    status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-    if status:
-        status.source = data.source
-        
-    last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
-    
-    if last_log and last_log.event == "ON":
-        last_log.source = data.source
-        
-    db.commit()
-    return {"message": "Source updated", "source": data.source}
+# --- CORE TELEMETRY ENDPOINTS (Now strictly event emitters) ---
 
 @app.post("/api/ping")
-def receive_ping(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+def receive_ping():
+    """Receives hardware ping, resets watchdog, emits event, and instantly returns."""
     now = datetime.now()
-    
-    if not status:
-        status = PowerStatus(id=1, last_ping=now, is_online=True, source="NEPA")
-        db.add(status)
-        db.add(PowerLog(event="ON", source="NEPA", timestamp=now))
-        background_tasks.add_task(send_telegram_alert, "⚡ Power restored via NEPA!")
-    else:
-        time_since_last_ping = (now - status.last_ping).total_seconds()
-        
-        # TIMING FIX: 65 Second Dead Man's Switch
-        if time_since_last_ping > 65 and status.is_online:
-            death_time = status.last_ping + timedelta(seconds=65)
-            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
-            db.add(PowerLog(event="ON", source=status.source, timestamp=now))
-            background_tasks.add_task(send_telegram_alert, f"⚡ Power restored via {status.source}!")
-            status.is_online = True
-            
-        elif not status.is_online:
-            db.add(PowerLog(event="ON", source=status.source, timestamp=now))
-            background_tasks.add_task(send_telegram_alert, f"⚡ Power restored via {status.source}!")
-            status.is_online = True
-            
-        status.last_ping = now
-    
-    db.commit()
-    return {"message": "Success"}
+    watchdog.reset(now)
+    bus.emit("PING_RECEIVED", now)
+    return {"message": "Event Dispatched: Ping"}
+
+@app.post("/api/source")
+def toggle_source(data: SourceToggle):
+    """Emits source change event."""
+    bus.emit("SOURCE_CHANGED", data.source)
+    return {"message": "Event Dispatched: Source Change", "source": data.source}
 
 @app.get("/api/status")
-def get_status(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def get_status(db: Session = Depends(get_db)):
+    """Strictly read-only. Safe from caching side-effects."""
     status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
     if not status: return {"nepa": "OFF", "source": "NEPA"}
-    
-    now = datetime.now()
-    diff = now - status.last_ping
-    
-    # TIMING FIX: 65 Second Dead Man's Switch
-    if diff > timedelta(seconds=65):
-        if status.is_online: 
-            status.is_online = False
-            # THE FIX: Calculate the exact time it died based on the last successful ping
-            death_time = status.last_ping + timedelta(seconds=65)
-            
-            # Log the outage using the death_time, NOT datetime.now()
-            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
-            db.commit()
+    return {"nepa": "ON" if status.is_online else "OFF", "source": status.source}
 
-            background_tasks.add_task(send_telegram_alert, "⚠️ ALERT: Power has been lost!")
-            
-        return {"nepa": "OFF", "source": status.source}
-    
-    return {"nepa": "ON", "source": status.source}
+# --- ANALYTICS & CRUD ENDPOINTS (Unchanged) ---
 
 @app.get("/api/logs")
 def get_logs(db: Session = Depends(get_db)):
-    logs = db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).limit(8).all()
-    return logs
+    return db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).limit(8).all()
 
 @app.get("/api/analytics/master")
 def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depends(get_db)):
@@ -361,7 +408,6 @@ def export_logs_csv(db: Session = Depends(get_db)):
     )
 
 # --- MANUAL OVERRIDE (CRUD) ENDPOINTS ---
-
 @app.post("/api/logs/manual")
 def add_manual_log(data: LogEntry, db: Session = Depends(get_db)):
     new_log = PowerLog(event=data.event, source=data.source, timestamp=data.timestamp)
@@ -372,8 +418,7 @@ def add_manual_log(data: LogEntry, db: Session = Depends(get_db)):
 @app.put("/api/logs/{log_id}")
 def edit_log(log_id: int, data: LogEntry, db: Session = Depends(get_db)):
     log = db.query(PowerLog).filter(PowerLog.id == log_id).first()
-    if not log:
-        return {"error": "Log not found"}
+    if not log: return {"error": "Log not found"}
     
     log.event = data.event
     log.source = data.source if data.event == "ON" else None
@@ -384,8 +429,7 @@ def edit_log(log_id: int, data: LogEntry, db: Session = Depends(get_db)):
 @app.delete("/api/logs/{log_id}")
 def delete_log(log_id: int, db: Session = Depends(get_db)):
     log = db.query(PowerLog).filter(PowerLog.id == log_id).first()
-    if not log:
-        return {"error": "Log not found"}
+    if not log: return {"error": "Log not found"}
     
     db.delete(log)
     db.commit()
