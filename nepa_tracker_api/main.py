@@ -162,7 +162,7 @@ class LogEntry(BaseModel):
 # --- CORE TELEMETRY ENDPOINTS (Now strictly event emitters) ---
 
 @app.post("/api/ping")
-def receive_ping():
+async def receive_ping():
     """Receives hardware ping, resets watchdog, emits event, and instantly returns."""
     now = datetime.now()
     watchdog.reset(now)
@@ -170,7 +170,7 @@ def receive_ping():
     return {"message": "Event Dispatched: Ping"}
 
 @app.post("/api/source")
-def toggle_source(data: SourceToggle):
+async def toggle_source(data: SourceToggle):
     """Emits source change event."""
     bus.emit("SOURCE_CHANGED", data.source)
     return {"message": "Event Dispatched: Source Change", "source": data.source}
