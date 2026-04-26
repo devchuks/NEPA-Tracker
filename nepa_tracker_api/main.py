@@ -136,29 +136,6 @@ def get_status(background_tasks: BackgroundTasks, db: Session = Depends(get_db))
     
     return {"nepa": "ON", "source": status.source}
 
-@app.post("/api/cron-trigger")
-def run_cron_check(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Un-cacheable endpoint specifically for the external cron job."""
-    status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-    if not status: 
-        return {"message": "No tracker configured"}
-    
-    now = datetime.now()
-    diff = now - status.last_ping
-    
-    # 65 Second Dead Man's Switch
-    if diff > timedelta(seconds=65) and status.is_online:
-        status.is_online = False
-        death_time = status.last_ping + timedelta(seconds=65)
-        
-        db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
-        db.commit()
-        
-        background_tasks.add_task(send_telegram_alert, f"⚠️ ALERT: Power lost at {death_time.strftime('%I:%M %p')}")
-        return {"message": "Outage detected and logged."}
-        
-    return {"message": "Power is stable or already offline."}
-
 @app.get("/api/logs")
 def get_logs(db: Session = Depends(get_db)):
     logs = db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).limit(8).all()
