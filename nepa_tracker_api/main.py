@@ -123,13 +123,17 @@ def get_status(background_tasks: BackgroundTasks, db: Session = Depends(get_db))
     if diff > timedelta(seconds=65):
         if status.is_online: 
             status.is_online = False
-            db.add(PowerLog(event="OFF", source=None, timestamp=now))
+            
+            # THE FIX: Calculate the exact time it died based on the last successful ping
+            death_time = status.last_ping + timedelta(seconds=65)
+            
+            # Log the outage using the death_time, NOT datetime.now()
+            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
             db.commit()
+            
             background_tasks.add_task(send_telegram_alert, "⚠️ ALERT: Power has been lost!")
             
         return {"nepa": "OFF", "source": status.source}
-    
-    return {"nepa": "ON", "source": status.source}
 
 @app.get("/api/logs")
 def get_logs(db: Session = Depends(get_db)):
