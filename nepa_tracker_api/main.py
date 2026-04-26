@@ -112,13 +112,29 @@ def receive_ping(background_tasks: BackgroundTasks, db: Session = Depends(get_db
     return {"message": "Success"}
 
 @app.get("/api/status")
-def get_status(db: Session = Depends(get_db)):
-    """Read-only endpoint for the React dashboard."""
+def get_status(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-    if not status: 
-        return {"nepa": "OFF", "source": "NEPA"}
-        
-    return {"nepa": "ON" if status.is_online else "OFF", "source": status.source}
+    if not status: return {"nepa": "OFF", "source": "NEPA"}
+    
+    now = datetime.now()
+    diff = now - status.last_ping
+    
+    # TIMING FIX: 65 Second Dead Man's Switch
+    if diff > timedelta(seconds=65):
+        if status.is_online: 
+            status.is_online = False
+            # THE FIX: Calculate the exact time it died based on the last successful ping
+            death_time = status.last_ping + timedelta(seconds=65)
+            
+            # Log the outage using the death_time, NOT datetime.now()
+            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
+            db.commit()
+
+            background_tasks.add_task(send_telegram_alert, "⚠️ ALERT: Power has been lost!")
+            
+        return {"nepa": "OFF", "source": status.source}
+    
+    return {"nepa": "ON", "source": status.source}
 
 @app.post("/api/cron-trigger")
 def run_cron_check(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
