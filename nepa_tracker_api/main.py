@@ -85,18 +85,24 @@ watchdog = WatchdogTimer()
 def handle_ping(timestamp: datetime):
     with SessionLocal() as db:
         status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        
+        # Format the time exactly how we want it to look in Telegram
+        formatted_time = timestamp.strftime('%I:%M %p')
+        alert_msg = f"🟢 POWER RESTORED\nTime: {formatted_time}"
+
         if not status:
             status = PowerStatus(id=1, last_ping=timestamp, is_online=True, source="NEPA")
             db.add(status)
             db.add(PowerLog(event="ON", source="NEPA", timestamp=timestamp))
-            send_telegram_alert("⚡ Power restored via NEPA!")
+            send_telegram_alert(alert_msg)
         else:
             status.last_ping = timestamp
             if not status.is_online:
                 status.is_online = True
                 db.add(PowerLog(event="ON", source=status.source, timestamp=timestamp))
-                send_telegram_alert(f"⚡ Power restored via {status.source}!")
+                send_telegram_alert(alert_msg)
         db.commit()
+
 
 def handle_power_lost(death_time: datetime):
     with SessionLocal() as db:
@@ -105,7 +111,12 @@ def handle_power_lost(death_time: datetime):
             status.is_online = False
             db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
             db.commit()
-            send_telegram_alert(f"⚠️ ALERT: Power lost at {death_time.strftime('%I:%M %p')}")
+            
+            # Format the time for the outage alert
+            formatted_time = death_time.strftime('%I:%M %p')
+            alert_msg = f"🔴 POWER LOST\nTime: {formatted_time}"
+            
+            send_telegram_alert(alert_msg)
 
 def handle_source_change(new_source: str):
     with SessionLocal() as db:
@@ -160,6 +171,15 @@ class LogEntry(BaseModel):
     timestamp: datetime
 
 # --- CORE TELEMETRY ENDPOINTS (Now strictly event emitters) ---
+
+@app.get("/")
+def health_check():
+    """Root endpoint for cloud health checks and browser testing."""
+    return {
+        "app": "NepaTracker API", 
+        "status": "Online", 
+        "architecture": "Event-Driven"
+    }
 
 @app.post("/api/ping")
 async def receive_ping():
