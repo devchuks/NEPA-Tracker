@@ -155,14 +155,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-""" # --- SILENCE HEARTBEAT LOGS ---
+# --- SILENCE HEARTBEAT LOGS ---
 class PingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         # Ignore any log message that contains the ping endpoint
         return record.getMessage().find("POST /api/ping") == -1
 
 # Apply the silencer to Uvicorn's access logger
-logging.getLogger("uvicorn.access").addFilter(PingFilter()) """
+logging.getLogger("uvicorn.access").addFilter(PingFilter())
 
 app.add_middleware(
     CORSMiddleware,
