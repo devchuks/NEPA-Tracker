@@ -7,7 +7,6 @@ import {
   ChevronLeft, ChevronRight, ChevronsRight, Battery, Clock, Activity 
 } from 'lucide-react';
 
-// --- CONSTANTS OUTSIDE COMPONENT TO PREVENT RE-CREATION ---
 const DAY_MS = 24 * 60 * 60 * 1000;
 const QUARTERS = [
   { name: 'Q1', months: [0, 1, 2] },
@@ -54,7 +53,6 @@ export default function Analytics({ darkMode }) {
     trend: [], distribution: [], kpis: { uptime: '0%', grid_hours: '0h', outages: '0' }
   });
   const [monthlyStats, setMonthlyStats] = useState({ avg_grid: '--', frequency: '--', uptime: '--' });
-  const [streak, setStreak] = useState({ hours: '0', start: '...', end: '...' });
 
   const cache = useRef({});
   const abortControllerRef = useRef(null);
@@ -107,19 +105,13 @@ export default function Analytics({ darkMode }) {
   };
 
   useEffect(() => {
-    fetch(`${API_URL}/api/analytics/streak`)
-      .then(res => res.json())
-      .then(setStreak).catch(e => console.error("Streak Sync Error:", e));
-  }, []);
-
-  useEffect(() => {
     const cacheKey = `monthStats-${currentYear}-${currentMonth}`;
     if (cache.current[cacheKey]) return setMonthlyStats(cache.current[cacheKey]);
     
     fetch(`${API_URL}/api/analytics/monthly/${currentYear}/${currentMonth}`)
       .then(res => res.json())
       .then(json => { cache.current[cacheKey] = json; setMonthlyStats(json); })
-      .catch(e => console.error("Monthly Sync Error:", e));
+      .catch(() => {}); // Error logging removed for security
   }, [currentYear, currentMonth]);
 
   useEffect(() => {
@@ -151,7 +143,7 @@ export default function Analytics({ darkMode }) {
           setViewDate(selectedDate); 
         }
       } catch (error) {
-        if (error.name !== 'AbortError') console.error("Master Sync Error:", error);
+         // Error logging removed for security
       }
     };
 
@@ -172,17 +164,14 @@ export default function Analytics({ darkMode }) {
   const inputDateString = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth()+1).padStart(2,'0')}-${String(selectedDate.getDate()).padStart(2,'0')}`;
 
   const renderDayTrace = () => {
-  // 1. Establish local midnight as the absolute 0% mark for the day
   const localMidnight = new Date(viewDate).setHours(0, 0, 0, 0);
 
   return (
     <div className="w-full h-full flex flex-col justify-center px-2">
-      {/* Container must be relative so children can be absolute */}
       <div className="relative w-full h-24 sm:h-32 overflow-visible bg-slate-50 dark:bg-slate-900 shadow-inner border border-slate-200 dark:border-slate-800 z-20">
         {chartTrendData.map((point, i) => {
           if (i === chartTrendData.length - 1) return null;
 
-          // 2. Calculate local duration and position relative to midnight
           const durationMs = chartTrendData[i + 1].timestamp - point.timestamp;
           const leftPercent = ((point.timestamp - localMidnight) / DAY_MS) * 100;
           const widthPercent = (durationMs / DAY_MS) * 100;
@@ -200,7 +189,6 @@ export default function Analytics({ darkMode }) {
                 width: `${widthPercent}%` 
               }}
             >
-              {/* Tooltip logic remains the same */}
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 whitespace-nowrap">
                 <div className="backdrop-blur-md p-2 lg:p-3 rounded shadow-2xl border bg-white/95 dark:bg-slate-950/95 border-slate-200 dark:border-slate-800 flex flex-col items-center">
                   <span className={`text-[10px] font-black uppercase tracking-widest ${point.level === 1 ? (point.status === 'NEPA' ? 'text-emerald-500' : 'text-amber-500') : 'text-slate-400'}`}>
@@ -216,7 +204,6 @@ export default function Analytics({ darkMode }) {
         })}
       </div>
 
-      {/* TIMELINE LABELS */}
       <div className="relative w-full h-24 mt-3 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest z-10">
         {(() => {
           const tiers = [-20, -20, -20];
@@ -224,7 +211,6 @@ export default function Analytics({ darkMode }) {
           const isToday = new Date(viewDate).toDateString() === new Date().toDateString();
 
           const labels = chartTrendData.map((point, i) => {
-            // 3. Labels also need to be positioned relative to local midnight
             const leftPercent = ((point.timestamp - localMidnight) / DAY_MS) * 100;
             const isLast = i === chartTrendData.length - 1;
             let assignedTier = 0;
@@ -252,7 +238,6 @@ export default function Analytics({ darkMode }) {
             );
           });
 
-          // 11:59 PM marker stays at 100%
           if (isToday) {
             labels.push(
               <div key="time-end-today" className="absolute hover:z-20 transition-all" style={{ left: `100%`, top: `60px` }}>
@@ -372,7 +357,6 @@ export default function Analytics({ darkMode }) {
         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode ? '#1e293b' : '#e2e8f0'} />
         <XAxis dataKey="name" fontSize={10} axisLine={false} tickLine={false} stroke={darkMode ? '#475569' : '#94a3b8'} />
         
-        {/* FIXED: Strict 0 to 24 domain with explicit 6-hour interval ticks */}
         <YAxis 
           stroke={darkMode ? '#475569' : '#94a3b8'} 
           fontSize={10} 
@@ -433,7 +417,7 @@ export default function Analytics({ darkMode }) {
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1 mt-6 overflow-hidden relative z-10"><div className="bg-emerald-500 h-full transition-all duration-1000" style={{ width: data.kpis.uptime }} /></div>
           </div>
 
-          <div className="order-5 lg:order-none w-full grid grid-cols-3 gap-[1px] bg-slate-200 dark:bg-slate-800">
+          <div className="order-5 lg:order-none w-full grid grid-cols-2 gap-[1px] bg-slate-200 dark:bg-slate-800">
             <div className="bg-white dark:bg-[#020617] p-4 lg:p-5 relative overflow-hidden flex flex-col justify-center">
               <Gauge className="text-emerald-500 mb-2" size={16} />
               <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Avg Grid</p>
@@ -443,11 +427,6 @@ export default function Analytics({ darkMode }) {
               <TrendingUp className="text-rose-500 mb-2" size={16} />
               <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Freq/Mon</p>
               <h4 className="text-lg font-black text-slate-900 dark:text-white leading-none">{monthlyStats.frequency}</h4>
-            </div>
-            <div className="bg-white dark:bg-[#020617] p-4 lg:p-5 relative overflow-hidden flex flex-col justify-center">
-              <Award className="text-amber-500 mb-2" size={16} />
-              <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Peak Streak</p>
-              <h4 className="text-lg font-black text-slate-900 dark:text-white leading-none">{streak.hours}h</h4>
             </div>
           </div>
         </div>

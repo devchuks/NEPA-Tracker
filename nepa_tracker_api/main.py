@@ -2,19 +2,20 @@ import os
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, BackgroundTasks
+from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, Security
+from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy import create_engine, Column, Integer, DateTime, String, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 import calendar
 from calendar import monthrange
-
 from telegram_service import send_telegram_alert
 from export_service import generate_nepa_csv
+import logging
 
 # --- DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nepa.db")
@@ -43,9 +44,18 @@ def get_db():
     try: yield db
     finally: db.close()
 
+# --- SECURITY SETUP ---
+# In production, set this in your .env or Render dashboard!
+SECRET_TOKEN = os.getenv("ADMIN_SECRET_TOKEN")
+header_scheme = APIKeyHeader(name="X-Admin-Token")
+
+def verify_admin(token: str = Security(header_scheme)):
+    if token != SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing token")
+    return token
+
 # --- EVENT BUS ARCHITECTURE ---
 class EventBus:
-    """Lightweight Pub/Sub system to decouple HTTP from Business Logic"""
     def __init__(self):
         self._subscribers = {}
 
@@ -55,7 +65,6 @@ class EventBus:
         self._subscribers[event_type].append(handler)
 
     def emit(self, event_type: str, *args, **kwargs):
-        # Run handlers in background threads to prevent blocking the FastAPI event loop
         for handler in self._subscribers.get(event_type, []):
             threading.Thread(target=handler, args=args, kwargs=kwargs).start()
 
@@ -63,16 +72,19 @@ bus = EventBus()
 
 # --- ASYNC WATCHDOG TIMER ---
 class WatchdogTimer:
-    """Autonomous internal timer that detects outages without external cron jobs"""
-    def __init__(self, timeout=65):
+    def __init__(self, timeout=50):
         self.timeout = timeout
         self.task = None
 
     async def _countdown(self, last_ping_time: datetime):
-        await asyncio.sleep(self.timeout)
-        # If this sleep finishes without being cancelled, the ESP32 died
-        death_time = last_ping_time + timedelta(seconds=self.timeout)
-        bus.emit("POWER_LOST", death_time)
+        try:
+            await asyncio.sleep(self.timeout)
+            death_time = last_ping_time + timedelta(seconds=self.timeout)
+            bus.emit("POWER_LOST", death_time)
+        except asyncio.CancelledError:
+            # Expected behavior! The ping arrived on time, 
+            # so we silently kill this countdown without throwing an error.
+            pass
 
     def reset(self, ping_time: datetime):
         if self.task and not self.task.done():
@@ -81,12 +93,10 @@ class WatchdogTimer:
 
 watchdog = WatchdogTimer()
 
-# --- EVENT HANDLERS (BUSINESS LOGIC) ---
+# --- EVENT HANDLERS ---
 def handle_ping(timestamp: datetime):
     with SessionLocal() as db:
         status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-        
-        # Format the time exactly how we want it to look in Telegram
         formatted_time = timestamp.strftime('%I:%M %p')
         alert_msg = f"🟢 POWER RESTORED\nTime: {formatted_time}"
 
@@ -103,7 +113,6 @@ def handle_ping(timestamp: datetime):
                 send_telegram_alert(alert_msg)
         db.commit()
 
-
 def handle_power_lost(death_time: datetime):
     with SessionLocal() as db:
         status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
@@ -111,11 +120,8 @@ def handle_power_lost(death_time: datetime):
             status.is_online = False
             db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
             db.commit()
-            
-            # Format the time for the outage alert
             formatted_time = death_time.strftime('%I:%M %p')
             alert_msg = f"🔴 POWER LOST\nTime: {formatted_time}"
-            
             send_telegram_alert(alert_msg)
 
 def handle_source_change(new_source: str):
@@ -127,18 +133,15 @@ def handle_source_change(new_source: str):
         last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
         if last_log and last_log.event == "ON":
             last_log.source = new_source
-            
         db.commit()
 
-# Register Handlers to the Event Bus
 bus.subscribe("PING_RECEIVED", handle_ping)
 bus.subscribe("POWER_LOST", handle_power_lost)
 bus.subscribe("SOURCE_CHANGED", handle_source_change)
 
-# --- FASTAPI LIFESPAN & APP SETUP ---
+# --- FASTAPI APP ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # On Startup: Check if server died mid-cycle and start watchdog if online
     with SessionLocal() as db:
         status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
         if status and status.is_online:
@@ -148,10 +151,18 @@ async def lifespan(app: FastAPI):
             else:
                 watchdog.reset(status.last_ping)
     yield
-    # On Shutdown: Cancel any pending watchdog tasks
     if watchdog.task: watchdog.task.cancel()
 
 app = FastAPI(lifespan=lifespan)
+
+""" # --- SILENCE HEARTBEAT LOGS ---
+class PingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Ignore any log message that contains the ping endpoint
+        return record.getMessage().find("POST /api/ping") == -1
+
+# Apply the silencer to Uvicorn's access logger
+logging.getLogger("uvicorn.access").addFilter(PingFilter()) """
 
 app.add_middleware(
     CORSMiddleware,
@@ -163,168 +174,163 @@ app.add_middleware(
 
 # --- PYDANTIC SCHEMAS ---
 class SourceToggle(BaseModel):
-    source: str
+    source: Literal["NEPA", "GEN"] # Security Fix: Input validation
 
 class LogEntry(BaseModel):
     event: str
     source: Optional[str] = None
     timestamp: datetime
 
-# --- CORE TELEMETRY ENDPOINTS (Now strictly event emitters) ---
-
+# --- CORE TELEMETRY ENDPOINTS ---
 @app.get("/")
 def health_check():
-    """Root endpoint for cloud health checks and browser testing."""
-    return {
-        "app": "NepaTracker API", 
-        "status": "Online", 
-        "architecture": "Event-Driven"
-    }
+    return {"app": "NepaTracker API", "status": "Online"}
 
-@app.post("/api/ping")
+@app.post("/api/ping", dependencies=[Depends(verify_admin)])
 async def receive_ping():
-    """Receives hardware ping, resets watchdog, emits event, and instantly returns."""
     now = datetime.now()
     watchdog.reset(now)
     bus.emit("PING_RECEIVED", now)
     return {"message": "Event Dispatched: Ping"}
 
-@app.post("/api/source")
+@app.post("/api/source", dependencies=[Depends(verify_admin)])
 async def toggle_source(data: SourceToggle):
-    """Emits source change event."""
     bus.emit("SOURCE_CHANGED", data.source)
     return {"message": "Event Dispatched: Source Change", "source": data.source}
 
 @app.get("/api/status")
 def get_status(db: Session = Depends(get_db)):
-    """Strictly read-only. Safe from caching side-effects."""
     status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
     if not status: return {"nepa": "OFF", "source": "NEPA"}
     return {"nepa": "ON" if status.is_online else "OFF", "source": status.source}
 
-# --- ANALYTICS & CRUD ENDPOINTS (Unchanged) ---
-
+# --- ANALYTICS ENDPOINTS ---
 @app.get("/api/logs")
 def get_logs(db: Session = Depends(get_db)):
     return db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).limit(8).all()
 
 @app.get("/api/analytics/master")
 def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depends(get_db)):
-    target_dt = datetime.strptime(date, "%Y-%m-%d")
-    
-    if timeframe == "day":
-        start_dt = target_dt
-        end_dt = start_dt + timedelta(days=1)
-    elif timeframe == "week":
-        start_dt = target_dt - timedelta(days=target_dt.weekday())
-        end_dt = start_dt + timedelta(days=7)
-    elif timeframe == "month":
-        start_dt = target_dt.replace(day=1)
-        _, days_in_month = monthrange(start_dt.year, start_dt.month)
-        end_dt = start_dt + timedelta(days=days_in_month)
-    elif timeframe == "year":
-        start_dt = target_dt.replace(month=1, day=1)
-        end_dt = start_dt.replace(year=start_dt.year + 1)
+    try:
+        target_dt = datetime.strptime(date, "%Y-%m-%d")
         
-    now = datetime.now()
-    math_end_dt = min(end_dt, now)
-        
-    initial_log = db.query(PowerLog).filter(PowerLog.timestamp <= start_dt).order_by(PowerLog.timestamp.desc()).first()
-    logs = db.query(PowerLog).filter(PowerLog.timestamp >= start_dt, PowerLog.timestamp < math_end_dt).order_by(PowerLog.timestamp.asc()).all()
-    
-    timeline = []
-    if initial_log:
-        timeline.append(PowerLog(event=initial_log.event, source=initial_log.source, timestamp=start_dt))
-    else:
-        timeline.append(PowerLog(event="OFF", source="OFFLINE", timestamp=start_dt))
-        
-    timeline.extend(logs)
-    timeline.append(PowerLog(event="END", source="END", timestamp=math_end_dt)) 
-    
-    stats = {"NEPA": 0, "GEN": 0, "OFF": 0}
-    trend = []
-    
-    if timeframe == "day":
-        for i in range(len(timeline) - 1):
-            curr, nxt = timeline[i], timeline[i+1]
-            dur = (nxt.timestamp - curr.timestamp).total_seconds() / 3600
-            level = 1 if curr.event == "ON" else 0
-            source = curr.source if curr.event == "ON" else "OFFLINE"
-            trend.append({
-                "time": curr.timestamp.strftime("%H:%M"), 
-                "timestamp": int(curr.timestamp.timestamp() * 1000),
-                "level": level, 
-                "status": source
-            })
-            if curr.event == "ON": stats[curr.source] += dur
-            else: stats["OFF"] += dur
-            
-        last = timeline[-2]
-        trend.append({
-            "time": "23:59", 
-            "timestamp": int(math_end_dt.timestamp() * 1000),
-            "level": 1 if last.event=="ON" else 0, 
-            "status": last.source if last.event=="ON" else "OFFLINE"
-        })
-    
-    else:
-        buckets = []
-        if timeframe == "week":
-            for i in range(7):
-                day_start = start_dt + timedelta(days=i)
-                buckets.append({"name": calendar.day_abbr[day_start.weekday()], "start": day_start, "end": day_start + timedelta(days=1), "Grid": 0, "Gen": 0})
+        if timeframe == "day":
+            start_dt = target_dt
+            end_dt = start_dt + timedelta(days=1)
+        elif timeframe == "week":
+            start_dt = target_dt - timedelta(days=target_dt.weekday())
+            end_dt = start_dt + timedelta(days=7)
         elif timeframe == "month":
-            _, days = monthrange(start_dt.year, start_dt.month)
-            for i in range(days):
-                day_start = start_dt + timedelta(days=i)
-                buckets.append({"name": str(i+1), "start": day_start, "end": day_start + timedelta(days=1), "Grid": 0, "Gen": 0})
+            start_dt = target_dt.replace(day=1)
+            _, days_in_month = monthrange(start_dt.year, start_dt.month)
+            end_dt = start_dt + timedelta(days=days_in_month)
         elif timeframe == "year":
-            for i in range(12):
-                month_start = start_dt.replace(month=i+1)
-                _, days = monthrange(month_start.year, month_start.month)
-                month_end = month_start + timedelta(days=days)
-                buckets.append({"name": calendar.month_abbr[i+1][0], "start": month_start, "end": month_end, "Grid": 0, "Gen": 0})
-
-        for i in range(len(timeline) - 1):
-            curr, nxt = timeline[i], timeline[i+1]
-            if curr.event == "ON":
-                ev_start = curr.timestamp
-                ev_end = nxt.timestamp
-                stats[curr.source] += (ev_end - ev_start).total_seconds() / 3600
+            start_dt = target_dt.replace(month=1, day=1)
+            end_dt = start_dt.replace(year=start_dt.year + 1)
+            
+        now = datetime.now()
+        math_end_dt = min(end_dt, now)
+            
+        initial_log = db.query(PowerLog).filter(PowerLog.timestamp <= start_dt).order_by(PowerLog.timestamp.desc()).first()
+        logs = db.query(PowerLog).filter(PowerLog.timestamp >= start_dt, PowerLog.timestamp < math_end_dt).order_by(PowerLog.timestamp.asc()).all()
+        
+        timeline = []
+        if initial_log:
+            timeline.append(PowerLog(event=initial_log.event, source=initial_log.source, timestamp=start_dt))
+        else:
+            timeline.append(PowerLog(event="OFF", source="OFFLINE", timestamp=start_dt))
+            
+        timeline.extend(logs)
+        timeline.append(PowerLog(event="END", source="END", timestamp=math_end_dt)) 
+        
+        stats = {"NEPA": 0, "GEN": 0, "OFF": 0}
+        trend = []
+        
+        if timeframe == "day":
+            for i in range(len(timeline) - 1):
+                curr, nxt = timeline[i], timeline[i+1]
+                dur = (nxt.timestamp - curr.timestamp).total_seconds() / 3600
+                level = 1 if curr.event == "ON" else 0
+                source = curr.source if curr.event == "ON" else "OFFLINE"
+                trend.append({
+                    "time": curr.timestamp.strftime("%H:%M"), 
+                    "timestamp": int(curr.timestamp.timestamp() * 1000),
+                    "level": level, 
+                    "status": source
+                })
+                if curr.event == "ON": stats[curr.source] += dur
+                else: stats["OFF"] += dur
                 
-                for b in buckets:
-                    overlap_start = max(ev_start, b["start"])
-                    overlap_end = min(ev_end, b["end"])
-                    if overlap_start < overlap_end:
-                        dur = (overlap_end - overlap_start).total_seconds() / 3600
-                        if curr.source == "NEPA": b["Grid"] += dur
-                        elif curr.source == "GEN": b["Gen"] += dur
-            else:
-                stats["OFF"] += (nxt.timestamp - curr.timestamp).total_seconds() / 3600
-
-        for b in buckets:
+            last = timeline[-2]
             trend.append({
-                "name": b["name"],
-                "Grid": round(b["Grid"], 1),
-                "Gen": round(b["Gen"], 1)
+                "time": "23:59", 
+                "timestamp": int(math_end_dt.timestamp() * 1000),
+                "level": 1 if last.event=="ON" else 0, 
+                "status": last.source if last.event=="ON" else "OFFLINE"
             })
+        
+        else:
+            buckets = []
+            if timeframe == "week":
+                for i in range(7):
+                    day_start = start_dt + timedelta(days=i)
+                    buckets.append({"name": calendar.day_abbr[day_start.weekday()], "start": day_start, "end": day_start + timedelta(days=1), "Grid": 0, "Gen": 0})
+            elif timeframe == "month":
+                _, days = monthrange(start_dt.year, start_dt.month)
+                for i in range(days):
+                    day_start = start_dt + timedelta(days=i)
+                    buckets.append({"name": str(i+1), "start": day_start, "end": day_start + timedelta(days=1), "Grid": 0, "Gen": 0})
+            elif timeframe == "year":
+                for i in range(12):
+                    month_start = start_dt.replace(month=i+1)
+                    _, days = monthrange(month_start.year, month_start.month)
+                    month_end = month_start + timedelta(days=days)
+                    buckets.append({"name": calendar.month_abbr[i+1][0], "start": month_start, "end": month_end, "Grid": 0, "Gen": 0})
 
-    total_hours = sum(stats.values())
-    uptime_pct = round(((stats["NEPA"] + stats["GEN"]) / total_hours) * 100) if total_hours > 0 else 0
-    
-    return {
-        "trend": trend,
-        "distribution": [
-            {"name": "Grid", "value": round(stats["NEPA"], 1), "color": "#ec4899"},
-            {"name": "Gen", "value": round(stats["GEN"], 1), "color": "#f59e0b"},
-            {"name": "Off", "value": round(stats["OFF"], 1), "color": "#94a3b8"}
-        ],
-        "kpis": {
-            "uptime": f"{uptime_pct}%",
-            "grid_hours": f"{round(stats['NEPA'], 1)}h",
-            "outages": len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
+            for i in range(len(timeline) - 1):
+                curr, nxt = timeline[i], timeline[i+1]
+                if curr.event == "ON":
+                    ev_start = curr.timestamp
+                    ev_end = nxt.timestamp
+                    stats[curr.source] += (ev_end - ev_start).total_seconds() / 3600
+                    
+                    for b in buckets:
+                        overlap_start = max(ev_start, b["start"])
+                        overlap_end = min(ev_end, b["end"])
+                        if overlap_start < overlap_end:
+                            dur = (overlap_end - overlap_start).total_seconds() / 3600
+                            if curr.source == "NEPA": b["Grid"] += dur
+                            elif curr.source == "GEN": b["Gen"] += dur
+                else:
+                    stats["OFF"] += (nxt.timestamp - curr.timestamp).total_seconds() / 3600
+
+            for b in buckets:
+                trend.append({
+                    "name": b["name"],
+                    "Grid": round(b["Grid"], 1),
+                    "Gen": round(b["Gen"], 1)
+                })
+
+        total_hours = sum(stats.values())
+        uptime_pct = round(((stats["NEPA"] + stats["GEN"]) / total_hours) * 100) if total_hours > 0 else 0
+        
+        return {
+            "trend": trend,
+            "distribution": [
+                {"name": "Grid", "value": round(stats["NEPA"], 1), "color": "#ec4899"},
+                {"name": "Gen", "value": round(stats["GEN"], 1), "color": "#f59e0b"},
+                {"name": "Off", "value": round(stats["OFF"], 1), "color": "#94a3b8"}
+            ],
+            "kpis": {
+                "uptime": f"{uptime_pct}%",
+                "grid_hours": f"{round(stats['NEPA'], 1)}h",
+                "outages": len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
+            }
         }
-    }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format provided.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
 @app.get("/api/analytics/monthly/{year}/{month}")
 def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
@@ -369,47 +375,6 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
         "uptime": f"{round(uptime)}%"
     }
 
-@app.get("/api/analytics/streak")
-def get_longest_streak(db: Session = Depends(get_db)):
-    try:
-        logs = db.query(PowerLog).order_by(PowerLog.timestamp.asc()).all()
-        if not logs: return {"hours": "0", "start": "---", "end": "---"}
-
-        max_duration = 0
-        current_start = None
-        best_start = None
-        best_end = None
-        
-        for log in logs:
-            if log.event == "ON" and log.source == "NEPA":
-                if current_start is None:
-                    current_start = log.timestamp
-            else:
-                if current_start is not None:
-                    duration = (log.timestamp - current_start).total_seconds()
-                    if duration > max_duration:
-                        max_duration = duration
-                        best_start = current_start
-                        best_end = log.timestamp
-                    current_start = None
-                    
-        if current_start is not None:
-            now = datetime.now()
-            duration = (now - current_start).total_seconds()
-            if duration > max_duration:
-                max_duration = duration
-                best_start = current_start
-                best_end = now
-                
-        if max_duration == 0: return {"hours": "0", "start": "---", "end": "---"}
-            
-        hours = max_duration / 3600
-        start_str = best_start.strftime("%b %d, %H:%M") if best_start else "---"
-        end_str = best_end.strftime("%b %d, %H:%M") if best_end else "---"
-        return {"hours": f"{round(hours, 1)}", "start": start_str, "end": end_str}
-    except Exception as e:
-        return {"hours": "Error", "start": "---", "end": "---"}
-
 @app.get("/api/logs/all")
 def get_all_logs(page: int = 1, limit: int = 50, db: Session = Depends(get_db)):
     offset = (page - 1) * limit
@@ -427,18 +392,18 @@ def export_logs_csv(db: Session = Depends(get_db)):
         headers={"Content-Disposition": "attachment; filename=nepa_archive_export.csv"}
     )
 
-# --- MANUAL OVERRIDE (CRUD) ENDPOINTS ---
-@app.post("/api/logs/manual")
+# --- MANUAL OVERRIDE ENDPOINTS (SECURED) ---
+@app.post("/api/logs/manual", dependencies=[Depends(verify_admin)])
 def add_manual_log(data: LogEntry, db: Session = Depends(get_db)):
     new_log = PowerLog(event=data.event, source=data.source, timestamp=data.timestamp)
     db.add(new_log)
     db.commit()
     return {"message": "Log added manually"}
 
-@app.put("/api/logs/{log_id}")
+@app.put("/api/logs/{log_id}", dependencies=[Depends(verify_admin)])
 def edit_log(log_id: int, data: LogEntry, db: Session = Depends(get_db)):
     log = db.query(PowerLog).filter(PowerLog.id == log_id).first()
-    if not log: return {"error": "Log not found"}
+    if not log: raise HTTPException(status_code=404, detail="Log not found")
     
     log.event = data.event
     log.source = data.source if data.event == "ON" else None
@@ -446,10 +411,10 @@ def edit_log(log_id: int, data: LogEntry, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Log updated successfully"}
 
-@app.delete("/api/logs/{log_id}")
+@app.delete("/api/logs/{log_id}", dependencies=[Depends(verify_admin)])
 def delete_log(log_id: int, db: Session = Depends(get_db)):
     log = db.query(PowerLog).filter(PowerLog.id == log_id).first()
-    if not log: return {"error": "Log not found"}
+    if not log: raise HTTPException(status_code=404, detail="Log not found")
     
     db.delete(log)
     db.commit()

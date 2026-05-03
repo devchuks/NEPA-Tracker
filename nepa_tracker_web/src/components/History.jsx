@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X } from 'lucide-react';
+import { getAdminToken } from '../App';
 
 export default function History({ darkMode }) {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
@@ -9,7 +10,6 @@ export default function History({ darkMode }) {
   const [total, setTotal] = useState(0);
   const limit = 50;
 
-  // --- MODAL STATE ---
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editForm, setEditForm] = useState({
     id: null,
@@ -31,16 +31,19 @@ export default function History({ darkMode }) {
     window.location.href = `${API_URL}/api/logs/export`;
   };
 
-  // --- FORMATTING HELPERS ---
-  const toLocalIsoString = (dateString) => {
-    const d = new Date(dateString.endsWith('Z') ? dateString : dateString + 'Z');
+  const toLocalIsoString = (dateInput) => {
+    // If it's a string from the API (already Lagos time), just extract YYYY-MM-DDTHH:mm:ss
+    if (typeof dateInput === 'string' && dateInput.includes('T')) {
+      return dateInput.substring(0, 19);
+    }
+    
+    // For new manual entries, format the browser's local time safely
+    const d = dateInput instanceof Date ? dateInput : new Date();
     const pad = (n) => String(n).padStart(2, '0');
-    // Returns the format YYYY-MM-DDTHH:mm:ss required by the browser input
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   };
 
-  // --- CRUD ACTIONS ---
-  const openModal = (log = null) => {
+ const openModal = (log = null) => {
     if (log) {
       setEditForm({
         id: log.id,
@@ -53,17 +56,20 @@ export default function History({ darkMode }) {
         id: null,
         event: 'ON',
         source: 'NEPA',
-        timestamp: toLocalIsoString(new Date().toISOString())
+        timestamp: toLocalIsoString(new Date()) // <-- CHANGED THIS LINE
       });
     }
     setIsModalOpen(true);
   };
 
   const saveLog = async () => {
+    const token = getAdminToken();
+    if (!token) return;
+
     const payload = {
       event: editForm.event,
       source: editForm.event === 'ON' ? editForm.source : null,
-      timestamp: new Date(editForm.timestamp).toISOString()
+      timestamp: editForm.timestamp // <-- CHANGED: Removed new Date().toISOString()
     };
 
     const url = editForm.id 
@@ -72,20 +78,41 @@ export default function History({ darkMode }) {
     
     const method = editForm.id ? 'PUT' : 'POST';
 
-    await fetch(url, {
+    const res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Admin-Token': token
+      },
       body: JSON.stringify(payload)
     });
 
-    setIsModalOpen(false);
-    fetchHistory();
+    if (res.status === 403) {
+      alert("Unauthorized: Incorrect Admin Password");
+      localStorage.removeItem("adminToken");
+    } else {
+      setIsModalOpen(false);
+      fetchHistory();
+    }
   };
 
   const deleteLog = async (id) => {
     if(!window.confirm("Delete this power log forever?")) return;
-    await fetch(`${API_URL}/api/logs/${id}`, { method: 'DELETE' });
-    fetchHistory();
+    
+    const token = getAdminToken();
+    if (!token) return;
+
+    const res = await fetch(`${API_URL}/api/logs/${id}`, { 
+      method: 'DELETE',
+      headers: { 'X-Admin-Token': token } 
+    });
+
+    if (res.status === 403) {
+      alert("Unauthorized: Incorrect Admin Password");
+      localStorage.removeItem("adminToken");
+    } else {
+      fetchHistory();
+    }
   };
 
   return (
@@ -165,45 +192,41 @@ export default function History({ darkMode }) {
 
               <div className="flex sm:col-span-3 justify-between sm:justify-start items-center sm:gap-8 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800/50">
   
-  {/* TIME BLOCK (Dashboard Style) */}
-  <div className="flex flex-col text-right sm:text-left shrink-0 min-w-[80px]">
-    <span className="text-xl sm:text-2xl font-black tracking-tighter text-slate-900 dark:text-white leading-none">
-      {new Date(log.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
-    </span>
-    <span className="text-slate-400 dark:text-slate-600 text-[10px] font-mono font-bold mt-1 sm:mt-0.5">
-      :{String(new Date(log.timestamp).getSeconds()).padStart(2, '0')}s
-    </span>
-  </div>
+                <div className="flex flex-col text-right sm:text-left shrink-0 min-w-[80px]">
+                  <span className="text-xl sm:text-2xl font-black tracking-tighter text-slate-900 dark:text-white leading-none">
+                    {new Date(log.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                  </span>
+                  <span className="text-slate-400 dark:text-slate-600 text-[10px] font-mono font-bold mt-1 sm:mt-0.5">
+                    :{String(new Date(log.timestamp).getSeconds()).padStart(2, '0')}s
+                  </span>
+                </div>
 
-  {/* DATE BLOCK (The "New Column") */}
-  <div className="flex flex-col items-end sm:items-start sm:border-l sm:border-slate-200 sm:dark:border-slate-800 sm:pl-6">
-    <span className="text-[10px] sm:text-xs font-black text-slate-900 dark:text-white uppercase tracking-tight">
-      {(() => {
-        const d = new Date(log.timestamp);
-        const day = d.getDate();
-        const month = d.toLocaleDateString('en-GB', { month: 'long' });
-        const year = d.getFullYear();
-        
-        // Ordinal logic: 1st, 2nd, 3rd, 4th, etc.
-        const ord = (n) => {
-          if (n > 3 && n < 21) return 'th';
-          switch (n % 10) {
-            case 1: return "st";
-            case 2: return "nd";
-            case 3: return "rd";
-            default: return "th";
-          }
-        };
+                <div className="flex flex-col items-end sm:items-start sm:border-l sm:border-slate-200 sm:dark:border-slate-800 sm:pl-6">
+                  <span className="text-[10px] sm:text-xs font-black text-slate-900 dark:text-white uppercase tracking-tight">
+                    {(() => {
+                      const d = new Date(log.timestamp);
+                      const day = d.getDate();
+                      const month = d.toLocaleDateString('en-GB', { month: 'long' });
+                      const year = d.getFullYear();
+                      
+                      const ord = (n) => {
+                        if (n > 3 && n < 21) return 'th';
+                        switch (n % 10) {
+                          case 1: return "st";
+                          case 2: return "nd";
+                          case 3: return "rd";
+                          default: return "th";
+                        }
+                      };
 
-        return `${day}${ord(day)} ${month}, ${year}`;
-      })()}
-    </span>
-    <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5">
-      {new Date(log.timestamp).toLocaleDateString('en-GB', { weekday: 'short' })}
-    </span>
-  </div>
-
-</div>
+                      return `${day}${ord(day)} ${month}, ${year}`;
+                    })()}
+                  </span>
+                  <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5">
+                    {new Date(log.timestamp).toLocaleDateString('en-GB', { weekday: 'short' })}
+                  </span>
+                </div>
+              </div>
               <div className="hidden sm:flex sm:col-span-2 justify-end gap-3">
                 <button onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
                 <button onClick={() => deleteLog(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>

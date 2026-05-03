@@ -6,6 +6,16 @@ import History from './components/History'
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Security Helper
+export const getAdminToken = () => {
+  let token = localStorage.getItem("adminToken");
+  if (!token) {
+    token = prompt("🔒 Enter Admin Password to make changes:");
+    if (token) localStorage.setItem("adminToken", token);
+  }
+  return token;
+};
+
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
   const day = date.getDate();
@@ -31,7 +41,6 @@ const getRelativeDay = (timestamp) => {
 }
 
 function App() {
-  // DYNAMIC API URL
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
 
   const [status, setStatus] = useState(() => localStorage.getItem('nepa-status') || 'SYNCING...')
@@ -54,7 +63,6 @@ function App() {
     window.scrollTo(0, 0);
   }, [location.pathname]);
 
-  // --- FUNCTION 1: Status & Logs ---
   const fetchData = async () => {
     try {
       const statusRes = await fetch(`${API_URL}/api/status`)
@@ -73,7 +81,6 @@ function App() {
     }
   }
 
-  // --- FUNCTION 2: At A Glance Mini-Bar ---
   const fetchTodayAnalytics = async () => {
     try {
       const now = new Date();
@@ -86,17 +93,14 @@ function App() {
       const data = await res.json();
       setTodayTrend(data.trend || []);
     } catch (e) {
-      console.error("Mini-bar sync error:", e);
+      // Error logging removed for security
     }
   };
 
-  // --- THE SMART VISIBILITY HOOK ---
   useEffect(() => {
-    // 1. Fetch immediately on initial load
     fetchData();
     fetchTodayAnalytics();
 
-    // 2. Set up the background timers (ONLY run if visible - 60s lazy poll)
     const fastInterval = setInterval(() => {
       if (document.visibilityState === 'visible') fetchData();
     }, 60000); 
@@ -105,18 +109,14 @@ function App() {
       if (document.visibilityState === 'visible') fetchTodayAnalytics();
     }, 60000); 
 
-    // 3. The "Snap to Live" trigger
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // Drop to neutral state before network request
-        
         fetchData();
         fetchTodayAnalytics();
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // 4. Cleanup
     return () => {
       clearInterval(fastInterval);
       clearInterval(slowInterval);
@@ -125,13 +125,25 @@ function App() {
   }, []);
 
   const handleSourceChange = async (newSource) => {
+    const token = getAdminToken();
+    if (!token) return;
+
     setPowerSource(newSource);
-    await fetch(`${API_URL}/api/source`, {
+    const res = await fetch(`${API_URL}/api/source`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Admin-Token': token
+      },
       body: JSON.stringify({ source: newSource })
     });
-    await fetchData();
+    
+    if (res.status === 403) {
+      alert("Unauthorized: Incorrect Admin Password");
+      localStorage.removeItem("adminToken");
+    } else {
+      await fetchData();
+    }
   }
 
   const toggleDarkMode = () => {
