@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X } from 'lucide-react';
-import { getAdminToken } from '../App';
+import AuthModal from './AuthModal'; // <-- IMPORTED NEW COMPONENT
 
 export default function History({ darkMode }) {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
@@ -10,6 +10,7 @@ export default function History({ darkMode }) {
   const [total, setTotal] = useState(0);
   const limit = 50;
 
+  // --- CRUD MODAL STATES ---
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editForm, setEditForm] = useState({
     id: null,
@@ -17,6 +18,12 @@ export default function History({ darkMode }) {
     source: 'NEPA',
     timestamp: ''
   });
+
+  // --- PREMIUM AUTH & DELETE STATES ---
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [pendingAction, setPendingAction] = useState(null); // 'save' or 'delete'
 
   const fetchHistory = async () => {
     const res = await fetch(`${API_URL}/api/logs/all?page=${page}&limit=${limit}`);
@@ -32,18 +39,15 @@ export default function History({ darkMode }) {
   };
 
   const toLocalIsoString = (dateInput) => {
-    // If it's a string from the API (already Lagos time), just extract YYYY-MM-DDTHH:mm:ss
     if (typeof dateInput === 'string' && dateInput.includes('T')) {
       return dateInput.substring(0, 19);
     }
-    
-    // For new manual entries, format the browser's local time safely
     const d = dateInput instanceof Date ? dateInput : new Date();
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   };
 
- const openModal = (log = null) => {
+  const openModal = (log = null) => {
     if (log) {
       setEditForm({
         id: log.id,
@@ -56,20 +60,29 @@ export default function History({ darkMode }) {
         id: null,
         event: 'ON',
         source: 'NEPA',
-        timestamp: toLocalIsoString(new Date()) // <-- CHANGED THIS LINE
+        timestamp: toLocalIsoString(new Date())
       });
     }
     setIsModalOpen(true);
   };
 
-  const saveLog = async () => {
-    const token = getAdminToken();
-    if (!token) return;
+  // --- INTERCEPTED SAVE LOGIC ---
+  const initiateSave = () => {
+    const token = localStorage.getItem("adminToken");
+    setAuthError("");
+    if (!token) {
+      setPendingAction('save');
+      setIsAuthModalOpen(true);
+      return;
+    }
+    executeSave(token);
+  };
 
+  const executeSave = async (token) => {
     const payload = {
       event: editForm.event,
       source: editForm.event === 'ON' ? editForm.source : null,
-      timestamp: editForm.timestamp // <-- CHANGED: Removed new Date().toISOString()
+      timestamp: editForm.timestamp
     };
 
     const url = editForm.id 
@@ -88,31 +101,60 @@ export default function History({ darkMode }) {
     });
 
     if (res.status === 403) {
-      alert("Unauthorized: Incorrect Admin Password");
       localStorage.removeItem("adminToken");
+      setAuthError("Invalid or expired password");
+      setPendingAction('save');
+      setIsAuthModalOpen(true);
     } else {
+      setAuthError("");
+      setIsAuthModalOpen(false);
       setIsModalOpen(false);
+      setPendingAction(null);
       fetchHistory();
     }
   };
 
-  const deleteLog = async (id) => {
-    if(!window.confirm("Delete this power log forever?")) return;
-    
-    const token = getAdminToken();
-    if (!token) return;
+  // --- INTERCEPTED DELETE LOGIC ---
+  const triggerDelete = (id) => {
+    setDeleteTarget(id);
+  };
 
-    const res = await fetch(`${API_URL}/api/logs/${id}`, { 
+  const confirmDelete = () => {
+    const token = localStorage.getItem("adminToken");
+    setAuthError("");
+    if (!token) {
+      setPendingAction('delete');
+      setIsAuthModalOpen(true);
+      return;
+    }
+    executeDelete(token);
+  };
+
+  const executeDelete = async (token) => {
+    const res = await fetch(`${API_URL}/api/logs/${deleteTarget}`, { 
       method: 'DELETE',
       headers: { 'X-Admin-Token': token } 
     });
 
     if (res.status === 403) {
-      alert("Unauthorized: Incorrect Admin Password");
       localStorage.removeItem("adminToken");
+      setAuthError("Invalid or expired password");
+      setPendingAction('delete');
+      setIsAuthModalOpen(true);
     } else {
+      setAuthError("");
+      setIsAuthModalOpen(false);
+      setDeleteTarget(null);
+      setPendingAction(null);
       fetchHistory();
     }
+  };
+
+  // --- GLOBAL AUTH SUBMISSION ---
+  const submitPassword = (token) => {
+    localStorage.setItem("adminToken", token);
+    if (pendingAction === 'save') executeSave(token);
+    if (pendingAction === 'delete') executeDelete(token);
   };
 
   return (
@@ -170,7 +212,7 @@ export default function History({ darkMode }) {
 
                 <div className="flex sm:hidden gap-4">
                   <button onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
-                  <button onClick={() => deleteLog(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+                  <button onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
                 </div>
               </div>
 
@@ -229,7 +271,7 @@ export default function History({ darkMode }) {
               </div>
               <div className="hidden sm:flex sm:col-span-2 justify-end gap-3">
                 <button onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
-                <button onClick={() => deleteLog(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+                <button onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
               </div>
 
             </div>
@@ -250,10 +292,10 @@ export default function History({ darkMode }) {
         </div>
       </div>
 
-      {/* --- CRUD MODAL --- */}
+      {/* --- CRUD MODAL (z-100) --- */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
-          <div className="bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 w-full max-w-md shadow-2xl relative">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/20 dark:bg-slate-950/60 backdrop-blur-md transition-colors">
+          <div className="bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 w-full max-w-md shadow-2xl dark:shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative transition-colors">
             <button onClick={() => setIsModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"><X size={20} /></button>
             
             <h3 className="text-xl font-black uppercase tracking-tighter text-slate-900 dark:text-white mb-6">
@@ -291,7 +333,7 @@ export default function History({ darkMode }) {
               </div>
 
               <button 
-                onClick={saveLog}
+                onClick={initiateSave}
                 className="w-full mt-4 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-black text-xs uppercase tracking-[0.2em] hover:opacity-90 transition-opacity"
               >
                 {editForm.id ? 'Save Changes' : 'Inject Record'}
@@ -300,6 +342,43 @@ export default function History({ darkMode }) {
           </div>
         </div>
       )}
+
+      {/* --- PREMIUM DELETE MODAL (z-200) --- */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/20 dark:bg-slate-950/60 backdrop-blur-md transition-colors">
+          <div className="bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-8 w-full max-w-sm shadow-2xl dark:shadow-[0_20px_50px_rgba(0,0,0,0.5)] text-center transition-colors">
+            <div className="w-16 h-16 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Trash2 size={32} />
+            </div>
+            <h3 className="text-xl font-black uppercase tracking-tighter text-slate-900 dark:text-white mb-2">Confirm Delete?</h3>
+            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-6">This record will be removed forever.</p>
+            
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setDeleteTarget(null)}
+                className="flex-1 py-3 border border-slate-200 dark:border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 transition-all"
+              >
+                Exit
+              </button>
+              <button 
+                onClick={confirmDelete}
+                className="flex-1 py-3 bg-red-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-red-600/20 hover:bg-red-700 transition-all"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- NEW SHARED AUTH MODAL (z-300) --- */}
+      <AuthModal 
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSubmit={submitPassword}
+        error={authError}
+        message="Enter password to authorize changes."
+      />
 
     </div>
   );

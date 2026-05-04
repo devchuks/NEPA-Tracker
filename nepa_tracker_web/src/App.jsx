@@ -3,18 +3,9 @@ import { Routes, Route, Link, useLocation } from 'react-router-dom'
 import { Activity, Calendar as CalendarIcon, ZapOff, Zap, Clock, Info, Sun, Moon } from 'lucide-react'
 import Analytics from './components/Analytics'
 import History from './components/History'
+import AuthModal from './components/AuthModal' // <-- IMPORTED NEW COMPONENT
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-// Security Helper
-export const getAdminToken = () => {
-  let token = localStorage.getItem("adminToken");
-  if (!token) {
-    token = prompt("🔒 Enter Admin Password to make changes:");
-    if (token) localStorage.setItem("adminToken", token);
-  }
-  return token;
-};
 
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
@@ -57,6 +48,11 @@ function App() {
 
   const [todayTrend, setTodayTrend] = useState([]);
 
+  // --- PREMIUM AUTH STATES ---
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [pendingSource, setPendingSource] = useState(null);
+
   const location = useLocation()
 
   useEffect(() => {
@@ -93,7 +89,7 @@ function App() {
       const data = await res.json();
       setTodayTrend(data.trend || []);
     } catch (e) {
-      // Error logging removed for security
+      // Silenced for production
     }
   };
 
@@ -124,11 +120,20 @@ function App() {
     };
   }, []);
 
-  const handleSourceChange = async (newSource) => {
-    const token = getAdminToken();
-    if (!token) return;
+  // --- PREMIUM AUTH FLOW ---
+  const handleSourceChange = (newSource) => {
+    const token = localStorage.getItem("adminToken");
+    setAuthError(""); // Clear any old errors
+    if (!token) {
+      setPendingSource(newSource);
+      setIsAuthModalOpen(true);
+      return;
+    }
+    executeSourceChange(newSource, token);
+  };
 
-    setPowerSource(newSource);
+  const executeSourceChange = async (newSource, token) => {
+    // Optimistic UI Update disabled here to ensure we don't switch if unauthorized
     const res = await fetch(`${API_URL}/api/source`, {
       method: 'POST',
       headers: { 
@@ -139,12 +144,23 @@ function App() {
     });
     
     if (res.status === 403) {
-      alert("Unauthorized: Incorrect Admin Password");
       localStorage.removeItem("adminToken");
+      setAuthError("Invalid or expired password"); // Set the error for the modal
+      setPendingSource(newSource);
+      setIsAuthModalOpen(true);
     } else {
+      setAuthError("");
+      setIsAuthModalOpen(false);
+      setPowerSource(newSource);
+      setPendingSource(null);
       await fetchData();
     }
-  }
+  };
+
+  const submitPassword = (token) => {
+    localStorage.setItem("adminToken", token);
+    if (pendingSource) executeSourceChange(pendingSource, token);
+  };
 
   const toggleDarkMode = () => {
     const nextMode = !darkMode;
@@ -378,6 +394,14 @@ function App() {
             <Route path="/history" element={<History darkMode={darkMode} />} />
           </Routes>
         </main>
+
+        <AuthModal 
+          isOpen={isAuthModalOpen}
+          onClose={() => setIsAuthModalOpen(false)}
+          onSubmit={submitPassword}
+          error={authError}
+        />
+
       </div>
     </div>
   )
