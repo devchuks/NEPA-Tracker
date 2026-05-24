@@ -66,74 +66,88 @@ class EventBus:
 
     def emit(self, event_type: str, *args, **kwargs):
         for handler in self._subscribers.get(event_type, []):
-            threading.Thread(target=handler, args=args, kwargs=kwargs).start()
+            asyncio.create_task(handler(*args, **kwargs))
 
 bus = EventBus()
 
 # --- ASYNC WATCHDOG TIMER ---
 class WatchdogTimer:
-    def __init__(self, timeout=50):
+    def __init__(self, timeout=75):
         self.timeout = timeout
         self.task = None
+        self.last_ping_time = datetime.min
 
-    async def _countdown(self, last_ping_time: datetime):
+    async def _countdown(self, scheduled_ping_time: datetime):
         try:
             await asyncio.sleep(self.timeout)
-            death_time = last_ping_time + timedelta(seconds=self.timeout)
+            
+            # RACE CONDITION KILLER: If a newer ping arrived while we were sleeping, abort!
+            if self.last_ping_time > scheduled_ping_time:
+                return
+                
+            death_time = scheduled_ping_time + timedelta(seconds=self.timeout)
             bus.emit("POWER_LOST", death_time)
         except asyncio.CancelledError:
-            # Expected behavior! The ping arrived on time, 
-            # so we silently kill this countdown without throwing an error.
             pass
 
     def reset(self, ping_time: datetime):
+        self.last_ping_time = ping_time
         if self.task and not self.task.done():
             self.task.cancel()
         self.task = asyncio.create_task(self._countdown(ping_time))
 
 watchdog = WatchdogTimer()
 
+# --- STATE LOCK (PREVENTS RACE CONDITIONS) ---
+state_lock = asyncio.Lock()
+
 # --- EVENT HANDLERS ---
-def handle_ping(timestamp: datetime):
-    with SessionLocal() as db:
-        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-        formatted_time = timestamp.strftime('%I:%M %p')
-        alert_msg = f"🟢 POWER RESTORED\nTime: {formatted_time}"
+async def handle_ping(timestamp: datetime):
+    async with state_lock:
+        with SessionLocal() as db:
+            status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+            formatted_time = timestamp.strftime('%I:%M:%S %p')
+            alert_msg = f"🟢 POWER RESTORED\nTime: {formatted_time}"
 
-        if not status:
-            status = PowerStatus(id=1, last_ping=timestamp, is_online=True, source="NEPA")
-            db.add(status)
-            db.add(PowerLog(event="ON", source="NEPA", timestamp=timestamp))
-            send_telegram_alert(alert_msg)
-        else:
-            status.last_ping = timestamp
-            if not status.is_online:
-                status.is_online = True
-                db.add(PowerLog(event="ON", source=status.source, timestamp=timestamp))
-                send_telegram_alert(alert_msg)
-        db.commit()
+            if not status:
+                status = PowerStatus(id=1, last_ping=timestamp, is_online=True, source="NEPA")
+                db.add(status)
+                db.add(PowerLog(event="ON", source="NEPA", timestamp=timestamp))
+                db.commit()
+                await asyncio.to_thread(send_telegram_alert, alert_msg)
+            else:
+                status.last_ping = timestamp
+                if not status.is_online:
+                    status.is_online = True
+                    db.add(PowerLog(event="ON", source=status.source, timestamp=timestamp))
+                    db.commit()
+                    await asyncio.to_thread(send_telegram_alert, alert_msg)
+                else:
+                    db.commit()
 
-def handle_power_lost(death_time: datetime):
-    with SessionLocal() as db:
-        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-        if status and status.is_online:
-            status.is_online = False
-            db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
+async def handle_power_lost(death_time: datetime):
+    async with state_lock:
+        with SessionLocal() as db:
+            status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+            if status and status.is_online:
+                status.is_online = False
+                db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
+                db.commit()
+                formatted_time = death_time.strftime('%I:%M:%S %p')
+                alert_msg = f"🔴 POWER LOST\nTime: {formatted_time}"
+                await asyncio.to_thread(send_telegram_alert, alert_msg)
+
+async def handle_source_change(new_source: str):
+    async with state_lock:
+        with SessionLocal() as db:
+            status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+            if status:
+                status.source = new_source
+                
+            last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
+            if last_log and last_log.event == "ON":
+                last_log.source = new_source
             db.commit()
-            formatted_time = death_time.strftime('%I:%M %p')
-            alert_msg = f"🔴 POWER LOST\nTime: {formatted_time}"
-            send_telegram_alert(alert_msg)
-
-def handle_source_change(new_source: str):
-    with SessionLocal() as db:
-        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-        if status:
-            status.source = new_source
-            
-        last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
-        if last_log and last_log.event == "ON":
-            last_log.source = new_source
-        db.commit()
 
 bus.subscribe("PING_RECEIVED", handle_ping)
 bus.subscribe("POWER_LOST", handle_power_lost)
@@ -197,6 +211,14 @@ async def receive_ping():
 async def toggle_source(data: SourceToggle):
     bus.emit("SOURCE_CHANGED", data.source)
     return {"message": "Event Dispatched: Source Change", "source": data.source}
+
+@app.post("/api/test-race", dependencies=[Depends(verify_admin)])
+async def test_race_condition():
+    now = datetime.now()
+    # Fire both conflicting events at the exact same millisecond!
+    bus.emit("POWER_LOST", now)
+    bus.emit("PING_RECEIVED", now)
+    return {"message": "Chaos triggered! Check your terminal and Telegram."}
 
 @app.get("/api/status")
 def get_status(db: Session = Depends(get_db)):
