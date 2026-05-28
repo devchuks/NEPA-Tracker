@@ -38,12 +38,21 @@ function App() {
   const [powerSource, setPowerSource] = useState(() => localStorage.getItem('nepa-source') || 'NEPA')
   const [logs, setLogs] = useState(() => {
     const savedLogs = localStorage.getItem('nepa-logs')
-    return savedLogs ? JSON.parse(savedLogs) : []
+    try {
+      return savedLogs ? JSON.parse(savedLogs) : []
+    } catch (e) {
+      localStorage.removeItem('nepa-logs')
+      return []
+    }
   })
   
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
-    return saved !== null ? JSON.parse(saved) : true;
+    try {
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (e) {
+      return true;
+    }
   });
 
   const [todayTrend, setTodayTrend] = useState([]);
@@ -61,15 +70,19 @@ function App() {
 
   const fetchData = async () => {
     try {
-      const statusRes = await fetch(`${API_URL}/api/status`)
+      const [statusRes, logsRes] = await Promise.all([
+        fetch(`${API_URL}/api/status`),
+        fetch(`${API_URL}/api/logs`)
+      ]);
+
       const statusData = await statusRes.json()
+      const logsData = await logsRes.json()
+
       setStatus(statusData.nepa)
       setPowerSource(statusData.source)
       localStorage.setItem('nepa-status', statusData.nepa)
       localStorage.setItem('nepa-source', statusData.source)
 
-      const logsRes = await fetch(`${API_URL}/api/logs`)
-      const logsData = await logsRes.json()
       setLogs(logsData)
       localStorage.setItem('nepa-logs', JSON.stringify(logsData))
     } catch (error) {

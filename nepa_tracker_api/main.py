@@ -14,8 +14,9 @@ from typing import Optional, Literal
 import calendar
 from calendar import monthrange
 from telegram_service import send_telegram_alert
-from export_service import generate_nepa_csv
+from export_service import generate_nepa_csv_stream
 import logging
+import secrets
 
 # --- DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nepa.db")
@@ -47,10 +48,12 @@ def get_db():
 # --- SECURITY SETUP ---
 # In production, set this in your .env or Render dashboard!
 SECRET_TOKEN = os.getenv("ADMIN_SECRET_TOKEN")
+if not SECRET_TOKEN:
+    print("⚠️ WARNING: ADMIN_SECRET_TOKEN is not set. Admin endpoints will be locked.")
 header_scheme = APIKeyHeader(name="X-Admin-Token")
 
 def verify_admin(token: str = Security(header_scheme)):
-    if token != SECRET_TOKEN:
+    if not SECRET_TOKEN or not secrets.compare_digest(token, SECRET_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing token")
     return token
 
@@ -275,7 +278,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                     "level": level, 
                     "status": source
                 })
-                if curr.event == "ON": stats[curr.source] += dur
+                if curr.event == "ON": stats[curr.source] = stats.get(curr.source, 0) + dur
                 else: stats["OFF"] += dur
                 
             last = timeline[-2]
@@ -310,7 +313,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                 if curr.event == "ON":
                     ev_start = curr.timestamp
                     ev_end = nxt.timestamp
-                    stats[curr.source] += (ev_end - ev_start).total_seconds() / 3600
+                    stats[curr.source] = stats.get(curr.source, 0) + (ev_end - ev_start).total_seconds() / 3600
                     
                     for b in buckets:
                         # OPTIMIZATION: Skip buckets that don't intersect
@@ -338,18 +341,18 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                 })
 
         total_hours = sum(stats.values())
-        uptime_pct = round(((stats["NEPA"] + stats["GEN"]) / total_hours) * 100) if total_hours > 0 else 0
+        uptime_pct = round(((stats.get("NEPA", 0) + stats.get("GEN", 0)) / total_hours) * 100) if total_hours > 0 else 0
         
         return {
             "trend": trend,
             "distribution": [
-                {"name": "Grid", "value": round(stats["NEPA"], 1), "color": "#ec4899"},
-                {"name": "Gen", "value": round(stats["GEN"], 1), "color": "#f59e0b"},
-                {"name": "Off", "value": round(stats["OFF"], 1), "color": "#94a3b8"}
+                {"name": "Grid", "value": round(stats.get("NEPA", 0), 1), "color": "#ec4899"},
+                {"name": "Gen", "value": round(stats.get("GEN", 0), 1), "color": "#f59e0b"},
+                {"name": "Off", "value": round(stats.get("OFF", 0), 1), "color": "#94a3b8"}
             ],
             "kpis": {
                 "uptime": f"{uptime_pct}%",
-                "grid_hours": f"{round(stats['NEPA'], 1)}h",
+                "grid_hours": f"{round(stats.get('NEPA', 0), 1)}h",
                 "outages": outage_count if timeframe != "day" else len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
             }
         }
@@ -381,7 +384,7 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
         curr, nxt = logs[i], logs[i+1]
         duration = (nxt.timestamp - curr.timestamp).total_seconds() / 3600
         if curr.event == "ON":
-            stats[curr.source] += duration
+            stats[curr.source] = stats.get(curr.source, 0) + duration
         else:
             stats["OFF"] += duration
             outage_count += 1
@@ -390,10 +393,10 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
     days_passed = (now - start_date).days if now < end_date else (end_date - start_date).days
     days_passed = max(days_passed, 1)
 
-    avg_grid = stats["NEPA"] / days_passed
+    avg_grid = stats.get("NEPA", 0) / days_passed
     freq = outage_count / days_passed
     total_time = sum(stats.values())
-    uptime = ((stats["NEPA"] + stats["GEN"]) / total_time * 100) if total_time > 0 else 0
+    uptime = ((stats.get("NEPA", 0) + stats.get("GEN", 0)) / total_time * 100) if total_time > 0 else 0
 
     return {
         "avg_grid": f"{round(avg_grid, 1)}h",
@@ -403,6 +406,8 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
 
 @app.get("/api/logs/all")
 def get_all_logs(page: int = 1, limit: int = 50, db: Session = Depends(get_db)):
+    page = max(1, page)
+    limit = max(1, min(100, limit)) # Cap maximum limit to prevent memory exhaust
     offset = (page - 1) * limit
     logs = db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).offset(offset).limit(limit).all()
     total = db.query(PowerLog).count()
@@ -410,10 +415,9 @@ def get_all_logs(page: int = 1, limit: int = 50, db: Session = Depends(get_db)):
 
 @app.get("/api/logs/export")
 def export_logs_csv(db: Session = Depends(get_db)):
-    logs = db.query(PowerLog).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
-    csv_data = generate_nepa_csv(logs)
+    logs_query = db.query(PowerLog).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).yield_per(1000)
     return StreamingResponse(
-        iter([csv_data]),
+        generate_nepa_csv_stream(logs_query),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=nepa_archive_export.csv"}
     )

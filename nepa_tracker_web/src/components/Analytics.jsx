@@ -86,7 +86,10 @@ export default function Analytics({ darkMode }) {
     const d = new Date(selectedDate);
     if (timeframe === 'day') d.setDate(d.getDate() + dir);
     if (timeframe === 'week') d.setDate(d.getDate() + (dir * 7));
-    if (timeframe === 'month') d.setMonth(d.getMonth() + dir);
+    if (timeframe === 'month') {
+      d.setDate(1); // Prevent date overflow (e.g. Jan 31 -> Feb 31 -> Mar 3)
+      d.setMonth(d.getMonth() + dir);
+    }
     if (timeframe === 'year') d.setFullYear(d.getFullYear() + dir);
     setSelectedDate(d);
   };
