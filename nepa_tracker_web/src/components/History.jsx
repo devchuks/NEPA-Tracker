@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X } from 'lucide-react';
+import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X, Loader2 } from 'lucide-react';
 import AuthModal from './AuthModal'; // <-- IMPORTED NEW COMPONENT
 
 export default function History({ darkMode }) {
@@ -8,7 +8,9 @@ export default function History({ darkMode }) {
   const [logs, setLogs] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const limit = 50;
+  const limit = 20;
+  const [selectedLogs, setSelectedLogs] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   // --- CRUD MODAL STATES ---
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -26,13 +28,30 @@ export default function History({ darkMode }) {
   const [pendingAction, setPendingAction] = useState(null); // 'save' or 'delete'
 
   const fetchHistory = async () => {
+    setIsLoading(true);
     const res = await fetch(`${API_URL}/api/logs/all?page=${page}&limit=${limit}`);
     const data = await res.json();
     setLogs(data.logs);
     setTotal(data.total);
+    setIsLoading(false);
   };
 
-  useEffect(() => { fetchHistory(); }, [page]);
+  useEffect(() => { 
+    fetchHistory(); 
+    setSelectedLogs([]); 
+  }, [page]);
+
+  const toggleSelect = (id) => {
+    setSelectedLogs(prev => prev.includes(id) ? prev.filter(logId => logId !== id) : [...prev, id]);
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedLogs.length === logs.length && logs.length > 0) {
+      setSelectedLogs([]);
+    } else {
+      setSelectedLogs(logs.map(log => log.id));
+    }
+  };
 
   const downloadCSV = () => {
     window.location.href = `${API_URL}/api/logs/export`;
@@ -127,7 +146,37 @@ export default function History({ darkMode }) {
       setIsAuthModalOpen(true);
       return;
     }
-    executeDelete(token);
+    
+    if (deleteTarget === 'bulk') {
+      executeBulkDelete(token);
+    } else {
+      executeDelete(token);
+    }
+  };
+
+  const executeBulkDelete = async (token) => {
+    const res = await fetch(`${API_URL}/api/logs/bulk-delete`, { 
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Admin-Token': token 
+      },
+      body: JSON.stringify({ log_ids: selectedLogs })
+    });
+
+    if (res.status === 403) {
+      localStorage.removeItem("adminToken");
+      setAuthError("Invalid or expired password");
+      setPendingAction('delete');
+      setIsAuthModalOpen(true);
+    } else {
+      setAuthError("");
+      setIsAuthModalOpen(false);
+      setDeleteTarget(null);
+      setPendingAction(null);
+      setSelectedLogs([]);
+      fetchHistory();
+    }
   };
 
   const executeDelete = async (token) => {
@@ -154,7 +203,10 @@ export default function History({ darkMode }) {
   const submitPassword = (token) => {
     localStorage.setItem("adminToken", token);
     if (pendingAction === 'save') executeSave(token);
-    if (pendingAction === 'delete') executeDelete(token);
+    if (pendingAction === 'delete') {
+      if (deleteTarget === 'bulk') executeBulkDelete(token);
+      else executeDelete(token);
+    }
   };
 
   return (
@@ -167,6 +219,14 @@ export default function History({ darkMode }) {
           <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Full Power Event Records</p>
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
+          {selectedLogs.length > 0 && (
+            <button 
+              onClick={() => setDeleteTarget('bulk')}
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-none font-black text-[10px] uppercase tracking-widest transition-all shadow-md shadow-red-500/20 active:opacity-50"
+            >
+              <Trash2 size={14} /> Delete ({selectedLogs.length})
+            </button>
+          )}
           <button 
             onClick={() => openModal()}
             className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 border border-slate-300 dark:border-slate-700 hover:border-slate-900 dark:hover:border-white text-slate-900 dark:text-white rounded-none font-black text-[10px] uppercase tracking-widest transition-all active:opacity-50"
@@ -186,13 +246,21 @@ export default function History({ darkMode }) {
         
         {/* Desktop Headers */}
         <div className="hidden sm:grid sm:grid-cols-12 bg-slate-50 dark:bg-[#020617] border-b border-slate-200 dark:border-slate-800 p-5 text-[10px] font-black uppercase tracking-widest text-slate-400">
-          <div className="col-span-4">Status Event</div>
+          <div className="col-span-4 flex items-center gap-3">
+            <input type="checkbox" checked={selectedLogs.length === logs.length && logs.length > 0} onChange={toggleSelectAll} className="w-3.5 h-3.5 cursor-pointer accent-blue-600" />
+            <span>Status Event</span>
+          </div>
           <div className="col-span-3">Power Source</div>
           <div className="col-span-3">Date & Time</div>
           <div className="col-span-2 text-right">Actions</div>
         </div>
 
-        <div className="divide-y divide-slate-100 dark:divide-slate-800/50">
+        <div className="divide-y divide-slate-100 dark:divide-slate-800/50 relative min-h-[200px]">
+          {isLoading && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/50 dark:bg-[#020617]/50 backdrop-blur-[2px]">
+              <Loader2 className="animate-spin text-emerald-500" size={32} />
+            </div>
+          )}
           {logs.map((log) => (
             <div key={log.id} className={`flex flex-col sm:grid sm:grid-cols-12 sm:items-center p-4 sm:p-5 transition-colors gap-3 sm:gap-0 hover:bg-slate-50 dark:hover:bg-slate-800/30 ${
               log.event === 'ON' 
@@ -202,6 +270,7 @@ export default function History({ darkMode }) {
               
               <div className="flex items-center justify-between sm:col-span-4">
                 <div className="flex items-center gap-3">
+                  <input type="checkbox" checked={selectedLogs.includes(log.id)} onChange={() => toggleSelect(log.id)} className="w-4 h-4 cursor-pointer accent-blue-600" />
                   <div className={`w-8 h-8 rounded flex items-center justify-center shrink-0 ${log.event === 'ON' ? 'bg-emerald-100 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-400'}`}>
                     {log.event === 'ON' ? <Zap size={14} /> : <ZapOff size={14} />}
                   </div>
@@ -350,8 +419,8 @@ export default function History({ darkMode }) {
             <div className="w-16 h-16 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
               <Trash2 size={32} />
             </div>
-            <h3 className="text-xl font-black uppercase tracking-tighter text-slate-900 dark:text-white mb-2">Confirm Delete?</h3>
-            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-6">This record will be removed forever.</p>
+            <h3 className="text-xl font-black uppercase tracking-tighter text-slate-900 dark:text-white mb-2">{deleteTarget === 'bulk' ? 'Delete Selected?' : 'Confirm Delete?'}</h3>
+            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-6">{deleteTarget === 'bulk' ? `You are about to delete ${selectedLogs.length} records.` : 'This record will be removed forever.'}</p>
             
             <div className="flex gap-3">
               <button 

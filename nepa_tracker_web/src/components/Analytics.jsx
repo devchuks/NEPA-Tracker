@@ -4,7 +4,7 @@ import {
 } from 'recharts';
 import { 
   TrendingUp, Zap, ZapOff, ShieldCheck, Gauge, ArrowUpRight, Award, 
-  ChevronLeft, ChevronRight, ChevronsRight, Battery, Clock, Activity 
+  ChevronLeft, ChevronRight, ChevronsRight, Battery, Clock, Activity
 } from 'lucide-react';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -53,9 +53,11 @@ export default function Analytics({ darkMode }) {
     trend: [], distribution: [], kpis: { uptime: '0%', grid_hours: '0h', outages: '0' }
   });
   const [monthlyStats, setMonthlyStats] = useState({ avg_grid: '--', frequency: '--', uptime: '--' });
+  const [isLoading, setIsLoading] = useState(true);
 
   const cache = useRef({});
   const abortControllerRef = useRef(null);
+  const isInitialLoad = useRef(true);
 
   const currentYear = selectedDate.getFullYear();
   const currentMonth = selectedDate.getMonth() + 1;
@@ -129,8 +131,11 @@ export default function Analytics({ darkMode }) {
       setData(cache.current[cacheKey]);
       setViewTimeframe(timeframe);
       setViewDate(selectedDate);
+      setIsLoading(false);
       return;
     }
+
+    setIsLoading(true);
 
     const fetchMasterData = async () => {
       try {
@@ -141,13 +146,18 @@ export default function Analytics({ darkMode }) {
           setData(json);
           setViewTimeframe(timeframe);
           setViewDate(selectedDate); 
+          setIsLoading(false);
         }
       } catch (error) {
-         // Error logging removed for security
+         if (!signal.aborted) setIsLoading(false);
       }
     };
 
-    const debounceTimer = setTimeout(() => fetchMasterData(), 300);
+    const delay = isInitialLoad.current ? 0 : 300;
+    const debounceTimer = setTimeout(() => {
+      isInitialLoad.current = false;
+      fetchMasterData();
+    }, delay);
     let pollTimer;
     if (isToday) pollTimer = setInterval(() => fetchMasterData(), 60000); 
 
@@ -158,8 +168,29 @@ export default function Analytics({ darkMode }) {
   }, [selectedDate, timeframe, currentYear, currentMonth]);
 
   const chartTrendData = useMemo(() => data?.trend || [], [data?.trend]);
-  const genHours = data.distribution?.find(d => d.name === 'Gen')?.value || 0;
-  const offHours = data.distribution?.find(d => d.name === 'Off')?.value || 0;
+
+  const { genHours, offHours } = useMemo(() => {
+    return {
+      genHours: data.distribution?.find(d => d.name === 'Gen')?.value || 0,
+      offHours: data.distribution?.find(d => d.name === 'Off')?.value || 0
+    };
+  }, [data.distribution]);
+
+  const heatmapDays = useMemo(() => {
+    const viewYear = viewDate.getFullYear();
+    const viewMonth = viewDate.getMonth() + 1;
+    const daysInMonth = new Date(viewYear, viewMonth, 0).getDate();
+
+    return Array.from({ length: daysInMonth }, (_, i) => {
+      const dayNum = i + 1;
+      const dayData = chartTrendData.find(d => String(d.name) === String(dayNum)) || { Grid: 0, Gen: 0 };
+      const grid = dayData.Grid || 0;
+      const gen = dayData.Gen || 0;
+      const off = Math.max(0, 24 - (grid + gen));
+      const uptime = Math.round(((grid + gen) / 24) * 100);
+      return { dayNum, grid, gen, off, uptime };
+    });
+  }, [viewDate, chartTrendData]);
   
   const inputDateString = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth()+1).padStart(2,'0')}-${String(selectedDate.getDate()).padStart(2,'0')}`;
 
@@ -263,15 +294,6 @@ export default function Analytics({ darkMode }) {
     const daysInMonth = new Date(viewYear, viewMonth, 0).getDate();
     
     const blanks = Array.from({ length: adjustedFirstDay }, (_, i) => i);
-    const days = Array.from({ length: daysInMonth }, (_, i) => {
-      const dayNum = i + 1;
-      const dayData = chartTrendData.find(d => String(d.name) === String(dayNum)) || { Grid: 0, Gen: 0 };
-      const grid = dayData.Grid || 0;
-      const gen = dayData.Gen || 0;
-      const off = Math.max(0, 24 - (grid + gen));
-      const uptime = Math.round(((grid + gen) / 24) * 100);
-      return { dayNum, grid, gen, off, uptime };
-    });
 
     return (
       <div className="w-full h-full flex flex-col">
@@ -280,7 +302,7 @@ export default function Analytics({ darkMode }) {
         </div>
         <div className="grid grid-cols-7 gap-[1px] bg-slate-200 dark:bg-slate-800 flex-1 border border-slate-200 dark:border-slate-800">
           {blanks.map(b => <div key={`blank-${b}`} className="bg-slate-50 dark:bg-slate-900/50" />)}
-          {days.map(d => {
+          {heatmapDays.map(d => {
             return (
               <div 
                 key={d.dayNum} 
@@ -413,7 +435,9 @@ export default function Analytics({ darkMode }) {
           <div className="order-3 lg:order-none w-full bg-white dark:bg-[#020617] p-6 lg:p-8 flex-1 flex flex-col justify-center relative overflow-hidden group min-h-[180px]">
               <ShieldCheck size={120} className="absolute -right-6 -bottom-6 opacity-5 text-slate-900 dark:text-white" />
               <h4 className="text-slate-400 dark:text-slate-500 text-[9px] font-black tracking-[0.2em] uppercase mb-1.5 relative z-10">{viewTimeframe} Reliability</h4>
-              <p className="text-slate-900 dark:text-white text-5xl font-black relative z-10">{data.kpis.uptime}</p>
+              <p className={`text-slate-900 dark:text-white text-5xl font-black relative z-10 transition-opacity duration-300 ${isLoading ? 'opacity-30' : 'opacity-100'}`}>
+                {data.kpis.uptime}
+              </p>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1 mt-6 overflow-hidden relative z-10"><div className="bg-emerald-500 h-full transition-all duration-1000" style={{ width: data.kpis.uptime }} /></div>
           </div>
 
@@ -444,7 +468,9 @@ export default function Analytics({ darkMode }) {
               <div key={i} className="bg-white dark:bg-[#020617] p-5 lg:p-6 relative overflow-hidden">
                 <m.icon size={20} className={`${m.color} mb-3`} />
                 <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">{m.label}</p>
-                <h4 className="text-xl font-black text-slate-900 dark:text-white mt-1">{m.val}</h4>
+                <h4 className={`text-xl font-black text-slate-900 dark:text-white mt-1 transition-opacity duration-300 ${isLoading ? 'opacity-30' : 'opacity-100'}`}>
+                  {m.val}
+                </h4>
               </div>
             ))}
           </div>
@@ -461,7 +487,10 @@ export default function Analytics({ darkMode }) {
               </div>
             </div>
             
-            <div className={`w-full ${viewTimeframe === 'year' ? 'flex flex-col flex-1 min-h-[320px] pb-2' : viewTimeframe === 'month' ? 'h-[320px]' : 'h-[280px]'}`}>
+            <div className={`w-full relative ${viewTimeframe === 'year' ? 'flex flex-col flex-1 min-h-[320px] pb-2' : viewTimeframe === 'month' ? 'h-[320px]' : 'h-[280px]'}`}>
+              {isLoading && (
+                <div className="absolute inset-0 z-50 bg-white/50 dark:bg-[#020617]/50 backdrop-blur-[2px]"></div>
+              )}
               {viewTimeframe === 'day' && renderDayTrace()}
               {viewTimeframe === 'week' && renderWeekBarChart()}
               {viewTimeframe === 'month' && renderMonthHeatmap()}

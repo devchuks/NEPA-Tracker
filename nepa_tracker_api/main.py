@@ -195,6 +195,9 @@ class LogEntry(BaseModel):
     source: Optional[str] = None
     timestamp: datetime
 
+class BulkDelete(BaseModel):
+    log_ids: list[int]
+
 # --- CORE TELEMETRY ENDPOINTS ---
 @app.get("/")
 def health_check():
@@ -211,14 +214,6 @@ async def receive_ping():
 async def toggle_source(data: SourceToggle):
     bus.emit("SOURCE_CHANGED", data.source)
     return {"message": "Event Dispatched: Source Change", "source": data.source}
-
-@app.post("/api/test-race", dependencies=[Depends(verify_admin)])
-async def test_race_condition():
-    now = datetime.now()
-    # Fire both conflicting events at the exact same millisecond!
-    bus.emit("POWER_LOST", now)
-    bus.emit("PING_RECEIVED", now)
-    return {"message": "Chaos triggered! Check your terminal and Telegram."}
 
 @app.get("/api/status")
 def get_status(db: Session = Depends(get_db)):
@@ -253,8 +248,8 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
         now = datetime.now()
         math_end_dt = min(end_dt, now)
             
-        initial_log = db.query(PowerLog).filter(PowerLog.timestamp <= start_dt).order_by(PowerLog.timestamp.desc()).first()
-        logs = db.query(PowerLog).filter(PowerLog.timestamp >= start_dt, PowerLog.timestamp < math_end_dt).order_by(PowerLog.timestamp.asc()).all()
+        initial_log = db.query(PowerLog).filter(PowerLog.timestamp <= start_dt).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
+        logs = db.query(PowerLog).filter(PowerLog.timestamp >= start_dt, PowerLog.timestamp < math_end_dt).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
         
         timeline = []
         if initial_log:
@@ -309,6 +304,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                     month_end = month_start + timedelta(days=days)
                     buckets.append({"name": calendar.month_abbr[i+1][0], "start": month_start, "end": month_end, "Grid": 0, "Gen": 0})
 
+            outage_count = 0
             for i in range(len(timeline) - 1):
                 curr, nxt = timeline[i], timeline[i+1]
                 if curr.event == "ON":
@@ -317,6 +313,12 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                     stats[curr.source] += (ev_end - ev_start).total_seconds() / 3600
                     
                     for b in buckets:
+                        # OPTIMIZATION: Skip buckets that don't intersect
+                        if b["end"] <= ev_start:
+                            continue
+                        if b["start"] >= ev_end:
+                            break # Buckets are chronological, so we can safely stop checking the rest!
+                            
                         overlap_start = max(ev_start, b["start"])
                         overlap_end = min(ev_end, b["end"])
                         if overlap_start < overlap_end:
@@ -325,6 +327,8 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                             elif curr.source == "GEN": b["Gen"] += dur
                 else:
                     stats["OFF"] += (nxt.timestamp - curr.timestamp).total_seconds() / 3600
+                    if curr.timestamp >= start_dt:
+                        outage_count += 1
 
             for b in buckets:
                 trend.append({
@@ -346,7 +350,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
             "kpis": {
                 "uptime": f"{uptime_pct}%",
                 "grid_hours": f"{round(stats['NEPA'], 1)}h",
-                "outages": len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
+                "outages": outage_count if timeframe != "day" else len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
             }
         }
     except ValueError:
@@ -365,7 +369,7 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
     logs = db.query(PowerLog).filter(
         PowerLog.timestamp >= start_date,
         PowerLog.timestamp < end_date
-    ).order_by(PowerLog.timestamp.asc()).all()
+    ).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
 
     if not logs:
         return {"avg_grid": "0h", "frequency": "0/day", "uptime": "0%"}
@@ -400,13 +404,13 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
 @app.get("/api/logs/all")
 def get_all_logs(page: int = 1, limit: int = 50, db: Session = Depends(get_db)):
     offset = (page - 1) * limit
-    logs = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).offset(offset).limit(limit).all()
+    logs = db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).offset(offset).limit(limit).all()
     total = db.query(PowerLog).count()
     return {"logs": logs, "total": total}
 
 @app.get("/api/logs/export")
 def export_logs_csv(db: Session = Depends(get_db)):
-    logs = db.query(PowerLog).order_by(PowerLog.timestamp.asc()).all()
+    logs = db.query(PowerLog).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
     csv_data = generate_nepa_csv(logs)
     return StreamingResponse(
         iter([csv_data]),
@@ -441,3 +445,10 @@ def delete_log(log_id: int, db: Session = Depends(get_db)):
     db.delete(log)
     db.commit()
     return {"message": "Log deleted"}
+
+@app.post("/api/logs/bulk-delete", dependencies=[Depends(verify_admin)])
+def bulk_delete_logs(data: BulkDelete, db: Session = Depends(get_db)):
+    # synchronize_session=False ensures max efficiency when deleting bulk rows directly in SQL
+    db.query(PowerLog).filter(PowerLog.id.in_(data.log_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"{len(data.log_ids)} logs deleted"}
