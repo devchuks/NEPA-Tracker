@@ -1,16 +1,38 @@
-import { useState, useEffect } from 'react';
-import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Download, ChevronLeft, ChevronRight, Zap, ZapOff, Database, Edit2, Trash2, Plus, X } from 'lucide-react';
 import AuthModal from './AuthModal'; // <-- IMPORTED NEW COMPONENT
+
+const historyPageCache = new Map();
+
+const responseErrorMessage = async (response, fallback) => {
+  try {
+    const body = await response.json();
+    return typeof body.detail === 'string' ? body.detail : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 export default function History({ darkMode }) {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
 
-  const [logs, setLogs] = useState([]);
+  const initialCachedPage = historyPageCache.get(1);
+  const [logs, setLogs] = useState(initialCachedPage?.logs || []);
   const [page, setPage] = useState(1);
-  const [total, setTotal] = useState(0);
+  const [viewPage, setViewPage] = useState(initialCachedPage ? 1 : null);
+  const [total, setTotal] = useState(initialCachedPage?.total || 0);
   const limit = 20;
   const [selectedLogs, setSelectedLogs] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(!initialCachedPage);
+  const [showInitialLoading, setShowInitialLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [showPageLoading, setShowPageLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+  const historyAbortRef = useRef(null);
+  const historyRequestIdRef = useRef(0);
+  const viewPageRef = useRef(initialCachedPage ? 1 : null);
+  const initialLoaderShownAtRef = useRef(0);
 
   // --- CRUD MODAL STATES ---
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -26,23 +48,106 @@ export default function History({ darkMode }) {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState("");
   const [pendingAction, setPendingAction] = useState(null); // 'save' or 'delete'
+  const [mutationPending, setMutationPending] = useState(null);
+  const [showMutationPending, setShowMutationPending] = useState(false);
+  const [mutationError, setMutationError] = useState("");
+  const mutationPendingRef = useRef(false);
 
-  const fetchHistory = async () => {
-    setIsLoading(true);
-    const res = await fetch(`${API_URL}/api/logs/all?page=${page}&limit=${limit}`);
-    const data = await res.json();
-    setLogs(data.logs);
-    setTotal(data.total);
-    setIsLoading(false);
-  };
+  useEffect(() => {
+    const cached = historyPageCache.get(page);
+    if (cached) {
+      setLogs(cached.logs);
+      setTotal(cached.total);
+      setViewPage(page);
+      viewPageRef.current = page;
+      setInitialLoading(false);
+      setPageLoading(true);
+    } else if (viewPageRef.current === null) {
+      setInitialLoading(true);
+    } else {
+      setPageLoading(true);
+    }
+    setLoadError("");
+    setSelectedLogs([]);
 
-  useEffect(() => { 
-    fetchHistory(); 
-    setSelectedLogs([]); 
-  }, [page]);
+    if (historyAbortRef.current) historyAbortRef.current.abort();
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
+    const requestId = ++historyRequestIdRef.current;
+
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/logs/all?page=${page}&limit=${limit}`, { signal: controller.signal });
+        if (!res.ok) throw new Error('History request failed');
+        const data = await res.json();
+        if (controller.signal.aborted || requestId !== historyRequestIdRef.current) return;
+        historyPageCache.set(page, data);
+        setLogs(data.logs);
+        setTotal(data.total);
+        setViewPage(page);
+        viewPageRef.current = page;
+        setLoadError("");
+      } catch {
+        if (!controller.signal.aborted && requestId === historyRequestIdRef.current) {
+          setLoadError(viewPageRef.current === null ? "Unable to load history" : `Unable to load page ${page}`);
+        }
+      } finally {
+        if (!controller.signal.aborted && requestId === historyRequestIdRef.current) {
+          setInitialLoading(false);
+          setPageLoading(false);
+        }
+      }
+    };
+
+    fetchHistory();
+    return () => controller.abort();
+  }, [API_URL, page, reloadToken]);
+
+  useEffect(() => {
+    let timer;
+    if (initialLoading) {
+      timer = setTimeout(() => {
+        initialLoaderShownAtRef.current = Date.now();
+        setShowInitialLoading(true);
+      }, 200);
+    } else if (showInitialLoading) {
+      const remaining = Math.max(0, 250 - (Date.now() - initialLoaderShownAtRef.current));
+      timer = setTimeout(() => setShowInitialLoading(false), remaining);
+    }
+    return () => clearTimeout(timer);
+  }, [initialLoading, showInitialLoading]);
+
+  useEffect(() => {
+    if (!pageLoading || initialLoading) {
+      setShowPageLoading(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowPageLoading(true), 450);
+    return () => clearTimeout(timer);
+  }, [pageLoading, initialLoading]);
+
+  useEffect(() => {
+    if (!mutationPending) {
+      setShowMutationPending(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowMutationPending(true), 450);
+    return () => clearTimeout(timer);
+  }, [mutationPending]);
 
   const toggleSelect = (id) => {
     setSelectedLogs(prev => prev.includes(id) ? prev.filter(logId => logId !== id) : [...prev, id]);
+  };
+
+  const refreshHistory = () => {
+    historyPageCache.clear();
+    sessionStorage.setItem('nepa-analytics-revision', String(Date.now()));
+    setReloadToken(value => value + 1);
+  };
+
+  const requestPage = (targetPage) => {
+    if (targetPage === page) setReloadToken(value => value + 1);
+    else setPage(targetPage);
   };
 
   const toggleSelectAll = () => {
@@ -67,6 +172,7 @@ export default function History({ darkMode }) {
   };
 
   const openModal = (log = null) => {
+    setMutationError("");
     if (log) {
       setEditForm({
         id: log.id,
@@ -87,8 +193,10 @@ export default function History({ darkMode }) {
 
   // --- INTERCEPTED SAVE LOGIC ---
   const initiateSave = () => {
+    if (mutationPendingRef.current) return;
     const token = localStorage.getItem("adminToken");
     setAuthError("");
+    setMutationError("");
     if (!token) {
       setPendingAction('save');
       setIsAuthModalOpen(true);
@@ -98,6 +206,10 @@ export default function History({ darkMode }) {
   };
 
   const executeSave = async (token) => {
+    if (mutationPendingRef.current) return;
+    mutationPendingRef.current = true;
+    setMutationPending('save');
+    setMutationError("");
     const payload = {
       event: editForm.event,
       source: editForm.event === 'ON' ? editForm.source : null,
@@ -110,37 +222,49 @@ export default function History({ darkMode }) {
     
     const method = editForm.id ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
-      method,
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Admin-Token': token
-      },
-      body: JSON.stringify(payload)
-    });
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Token': token
+        },
+        body: JSON.stringify(payload)
+      });
 
-    if (res.status === 403) {
-      localStorage.removeItem("adminToken");
-      setAuthError("Invalid or expired password");
-      setPendingAction('save');
-      setIsAuthModalOpen(true);
-    } else {
-      setAuthError("");
-      setIsAuthModalOpen(false);
-      setIsModalOpen(false);
-      setPendingAction(null);
-      fetchHistory();
+      if (res.status === 403) {
+        localStorage.removeItem("adminToken");
+        setAuthError("Invalid or expired password");
+        setPendingAction('save');
+        setIsAuthModalOpen(true);
+      } else if (res.ok) {
+        setAuthError("");
+        setIsAuthModalOpen(false);
+        setIsModalOpen(false);
+        setPendingAction(null);
+        refreshHistory();
+      } else {
+        setMutationError(await responseErrorMessage(res, "Unable to save entry."));
+      }
+    } catch {
+      setMutationError("Unable to save entry. Check the connection and retry.");
+    } finally {
+      mutationPendingRef.current = false;
+      setMutationPending(null);
     }
   };
 
   // --- INTERCEPTED DELETE LOGIC ---
   const triggerDelete = (id) => {
+    setMutationError("");
     setDeleteTarget(id);
   };
 
   const confirmDelete = () => {
+    if (mutationPendingRef.current) return;
     const token = localStorage.getItem("adminToken");
     setAuthError("");
+    setMutationError("");
     if (!token) {
       setPendingAction('delete');
       setIsAuthModalOpen(true);
@@ -155,47 +279,73 @@ export default function History({ darkMode }) {
   };
 
   const executeBulkDelete = async (token) => {
-    const res = await fetch(`${API_URL}/api/logs/bulk-delete`, { 
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Admin-Token': token 
-      },
-      body: JSON.stringify({ log_ids: selectedLogs })
-    });
+    if (mutationPendingRef.current) return;
+    mutationPendingRef.current = true;
+    setMutationPending('delete');
+    setMutationError("");
+    try {
+      const res = await fetch(`${API_URL}/api/logs/bulk-delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Token': token
+        },
+        body: JSON.stringify({ log_ids: selectedLogs })
+      });
 
-    if (res.status === 403) {
-      localStorage.removeItem("adminToken");
-      setAuthError("Invalid or expired password");
-      setPendingAction('delete');
-      setIsAuthModalOpen(true);
-    } else {
-      setAuthError("");
-      setIsAuthModalOpen(false);
-      setDeleteTarget(null);
-      setPendingAction(null);
-      setSelectedLogs([]);
-      fetchHistory();
+      if (res.status === 403) {
+        localStorage.removeItem("adminToken");
+        setAuthError("Invalid or expired password");
+        setPendingAction('delete');
+        setIsAuthModalOpen(true);
+      } else if (res.ok) {
+        setAuthError("");
+        setIsAuthModalOpen(false);
+        setDeleteTarget(null);
+        setPendingAction(null);
+        setSelectedLogs([]);
+        refreshHistory();
+      } else {
+        setMutationError(await responseErrorMessage(res, "Unable to delete selected entries."));
+      }
+    } catch {
+      setMutationError("Unable to delete selected entries. Check the connection and retry.");
+    } finally {
+      mutationPendingRef.current = false;
+      setMutationPending(null);
     }
   };
 
   const executeDelete = async (token) => {
-    const res = await fetch(`${API_URL}/api/logs/${deleteTarget}`, { 
-      method: 'DELETE',
-      headers: { 'X-Admin-Token': token } 
-    });
+    if (mutationPendingRef.current) return;
+    mutationPendingRef.current = true;
+    setMutationPending('delete');
+    setMutationError("");
+    try {
+      const res = await fetch(`${API_URL}/api/logs/${deleteTarget}`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Token': token }
+      });
 
-    if (res.status === 403) {
-      localStorage.removeItem("adminToken");
-      setAuthError("Invalid or expired password");
-      setPendingAction('delete');
-      setIsAuthModalOpen(true);
-    } else {
-      setAuthError("");
-      setIsAuthModalOpen(false);
-      setDeleteTarget(null);
-      setPendingAction(null);
-      fetchHistory();
+      if (res.status === 403) {
+        localStorage.removeItem("adminToken");
+        setAuthError("Invalid or expired password");
+        setPendingAction('delete');
+        setIsAuthModalOpen(true);
+      } else if (res.ok) {
+        setAuthError("");
+        setIsAuthModalOpen(false);
+        setDeleteTarget(null);
+        setPendingAction(null);
+        refreshHistory();
+      } else {
+        setMutationError(await responseErrorMessage(res, "Unable to delete entry."));
+      }
+    } catch {
+      setMutationError("Unable to delete entry. Check the connection and retry.");
+    } finally {
+      mutationPendingRef.current = false;
+      setMutationPending(null);
     }
   };
 
@@ -217,6 +367,8 @@ export default function History({ darkMode }) {
         <div>
           <h2 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white uppercase">Archive Vault</h2>
           <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Full Power Event Records</p>
+          {showPageLoading && <p role="status" aria-live="polite" className="text-[9px] font-bold uppercase tracking-widest text-blue-500 mt-1">Loading page {page}...</p>}
+          {loadError && <p role="alert" className="text-[9px] font-bold text-red-500 mt-1">{loadError}</p>}
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
           {selectedLogs.length > 0 && (
@@ -256,9 +408,10 @@ export default function History({ darkMode }) {
         </div>
 
         <div className="divide-y divide-slate-100 dark:divide-slate-800/50 relative min-h-[200px]">
-          {isLoading && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/50 dark:bg-[#020617]/50 backdrop-blur-[2px]">
-              <Loader2 className="animate-spin text-emerald-500" size={32} />
+          {showInitialLoading && (
+            <div role="status" aria-live="polite" className="absolute inset-0 z-50 bg-white dark:bg-[#020617] p-5 space-y-3">
+              <span className="sr-only">Loading history</span>
+              {[0, 1, 2].map(item => <div key={item} className="h-16 bg-slate-100 dark:bg-slate-900 animate-pulse" />)}
             </div>
           )}
           {logs.map((log) => (
@@ -280,8 +433,8 @@ export default function History({ darkMode }) {
                 </div>
 
                 <div className="flex sm:hidden gap-4">
-                  <button onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
-                  <button onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+                  <button aria-label="Edit history entry" onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
+                  <button aria-label="Delete history entry" onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
                 </div>
               </div>
 
@@ -339,24 +492,33 @@ export default function History({ darkMode }) {
                 </div>
               </div>
               <div className="hidden sm:flex sm:col-span-2 justify-end gap-3">
-                <button onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
-                <button onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+                <button aria-label="Edit history entry" onClick={() => openModal(log)} className="text-slate-400 hover:text-blue-500 transition-colors"><Edit2 size={16} /></button>
+                <button aria-label="Delete history entry" onClick={() => triggerDelete(log.id)} className="text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
               </div>
 
             </div>
           ))}
+          {!initialLoading && viewPage !== null && logs.length === 0 && !loadError && (
+            <div className="min-h-[200px] flex flex-col items-center justify-center text-slate-400 dark:text-slate-500">
+              <Database size={28} className="mb-3" />
+              <p className="text-xs font-black uppercase tracking-widest">No history records found</p>
+            </div>
+          )}
+          {!initialLoading && viewPage === null && loadError && (
+            <div role="alert" className="min-h-[200px] flex items-center justify-center text-sm font-bold text-red-500">Unable to load history.</div>
+          )}
         </div>
 
         <div className="p-4 sm:p-5 flex flex-col sm:flex-row justify-between items-center gap-4 bg-slate-50 dark:bg-[#020617] border-t border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <Database size={14} className="text-slate-400" />
             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-              Page {page} of {Math.max(1, Math.ceil(total / limit))} <span className="hidden sm:inline">({total} Records)</span>
+              Page {viewPage || 1} of {Math.max(1, Math.ceil(total / limit))} <span className="hidden sm:inline">({total} Records)</span>
             </span>
           </div>
           <div className="flex gap-2 w-full sm:w-auto">
-            <button disabled={page === 1} onClick={() => setPage(p => p - 1)} className="flex-1 sm:flex-none flex justify-center p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"><ChevronLeft size={16}/></button>
-            <button disabled={page * limit >= total} onClick={() => setPage(p => p + 1)} className="flex-1 sm:flex-none flex justify-center p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"><ChevronRight size={16}/></button>
+            <button aria-label="Previous history page" disabled={pageLoading || (viewPage || 1) === 1} onClick={() => requestPage((viewPage || 1) - 1)} className="flex-1 sm:flex-none flex justify-center p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"><ChevronLeft size={16}/></button>
+            <button aria-label="Next history page" disabled={pageLoading || (viewPage || 1) * limit >= total} onClick={() => requestPage((viewPage || 1) + 1)} className="flex-1 sm:flex-none flex justify-center p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"><ChevronRight size={16}/></button>
           </div>
         </div>
       </div>
@@ -365,7 +527,7 @@ export default function History({ darkMode }) {
       {isModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/20 dark:bg-slate-950/60 backdrop-blur-md transition-colors">
           <div className="bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 w-full max-w-md shadow-2xl dark:shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative transition-colors">
-            <button onClick={() => setIsModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"><X size={20} /></button>
+            <button aria-label="Close history editor" disabled={Boolean(mutationPending)} onClick={() => setIsModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors disabled:opacity-50"><X size={20} /></button>
             
             <h3 className="text-xl font-black uppercase tracking-tighter text-slate-900 dark:text-white mb-6">
               {editForm.id ? 'Edit Log Entry' : 'New Manual Entry'}
@@ -403,10 +565,12 @@ export default function History({ darkMode }) {
 
               <button 
                 onClick={initiateSave}
-                className="w-full mt-4 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-black text-xs uppercase tracking-[0.2em] hover:opacity-90 transition-opacity"
+                disabled={Boolean(mutationPending)}
+                className="w-full mt-4 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-black text-xs uppercase tracking-[0.2em] hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {editForm.id ? 'Save Changes' : 'Inject Record'}
+                {showMutationPending && mutationPending === 'save' ? 'Saving...' : editForm.id ? 'Save Changes' : 'Inject Record'}
               </button>
+              {mutationError && <p role="alert" className="text-[10px] font-bold text-red-500 text-center">{mutationError}</p>}
             </div>
           </div>
         </div>
@@ -425,17 +589,20 @@ export default function History({ darkMode }) {
             <div className="flex gap-3">
               <button 
                 onClick={() => setDeleteTarget(null)}
-                className="flex-1 py-3 border border-slate-200 dark:border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 transition-all"
+                disabled={Boolean(mutationPending)}
+                className="flex-1 py-3 border border-slate-200 dark:border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 transition-all disabled:opacity-50"
               >
                 Exit
               </button>
               <button 
                 onClick={confirmDelete}
-                className="flex-1 py-3 bg-red-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-red-600/20 hover:bg-red-700 transition-all"
+                disabled={Boolean(mutationPending)}
+                className="flex-1 py-3 bg-red-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-red-600/20 hover:bg-red-700 transition-all disabled:opacity-50"
               >
-                Delete
+                {showMutationPending && mutationPending === 'delete' ? 'Deleting...' : 'Delete'}
               </button>
             </div>
+            {mutationError && <p role="alert" className="text-[10px] font-bold text-red-500 mt-4">{mutationError}</p>}
           </div>
         </div>
       )}
@@ -446,6 +613,8 @@ export default function History({ darkMode }) {
         onClose={() => setIsAuthModalOpen(false)}
         onSubmit={submitPassword}
         error={authError}
+        pending={Boolean(mutationPending)}
+        showPending={showMutationPending}
         message="Enter password to authorize changes."
       />
 

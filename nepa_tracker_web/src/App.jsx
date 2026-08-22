@@ -1,11 +1,29 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { Routes, Route, Link, useLocation } from 'react-router-dom'
 import { Activity, Calendar as CalendarIcon, ZapOff, Zap, Clock, Info, Sun, Moon } from 'lucide-react'
-import Analytics from './components/Analytics'
-import History from './components/History'
 import AuthModal from './components/AuthModal' // <-- IMPORTED NEW COMPONENT
 
+const Analytics = lazy(() => import('./components/Analytics'));
+const History = lazy(() => import('./components/History'));
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+function DelayedRouteFallback() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), 200);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return visible ? (
+    <div role="status" aria-live="polite" className="min-h-[320px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#020617] p-8">
+      <span className="sr-only">Loading page</span>
+      <div className="h-5 w-40 bg-slate-200 dark:bg-slate-800 animate-pulse mb-8" />
+      <div className="h-56 bg-slate-100 dark:bg-slate-900 animate-pulse" />
+    </div>
+  ) : <div className="min-h-[320px]" aria-hidden="true" />;
+}
 
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
@@ -34,17 +52,20 @@ const getRelativeDay = (timestamp) => {
 function App() {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
 
-  const [status, setStatus] = useState(() => localStorage.getItem('nepa-status') || 'SYNCING...')
-  const [powerSource, setPowerSource] = useState(() => localStorage.getItem('nepa-source') || 'NEPA')
-  const [logs, setLogs] = useState(() => {
-    const savedLogs = localStorage.getItem('nepa-logs')
-    try {
-      return savedLogs ? JSON.parse(savedLogs) : []
-    } catch (e) {
-      localStorage.removeItem('nepa-logs')
-      return []
-    }
-  })
+  const [status, setStatus] = useState(null);
+  const [powerSource, setPowerSource] = useState(null);
+  const [eventsToday, setEventsToday] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [statusError, setStatusError] = useState("");
+  const [logsError, setLogsError] = useState("");
+  const [lastSynced, setLastSynced] = useState(null);
+  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
+  const [showDashboardLoader, setShowDashboardLoader] = useState(false);
+  const [showDashboardUpdating, setShowDashboardUpdating] = useState(false);
+  const statusVerifiedRef = useRef(false);
+  const dashboardAbortRef = useRef(null);
+  const dashboardLoaderShownAtRef = useRef(0);
+  const dashboardUpdatingShownAtRef = useRef(0);
   
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
@@ -61,6 +82,10 @@ function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState("");
   const [pendingSource, setPendingSource] = useState(null);
+  const [sourcePending, setSourcePending] = useState(false);
+  const [showSourcePending, setShowSourcePending] = useState(false);
+  const [sourceError, setSourceError] = useState("");
+  const sourcePendingRef = useRef(false);
 
   const location = useLocation()
 
@@ -68,26 +93,83 @@ function App() {
     window.scrollTo(0, 0);
   }, [location.pathname]);
 
-  const fetchData = async () => {
-    try {
-      const [statusRes, logsRes] = await Promise.all([
-        fetch(`${API_URL}/api/status`),
-        fetch(`${API_URL}/api/logs`)
-      ]);
-
-      const statusData = await statusRes.json()
-      const logsData = await logsRes.json()
-
-      setStatus(statusData.nepa)
-      setPowerSource(statusData.source)
-      localStorage.setItem('nepa-status', statusData.nepa)
-      localStorage.setItem('nepa-source', statusData.source)
-
-      setLogs(logsData)
-      localStorage.setItem('nepa-logs', JSON.stringify(logsData))
-    } catch (error) {
-      setStatus('SERVER DOWN')
+  useEffect(() => {
+    let timer;
+    if (status !== null || statusError) {
+      if (showDashboardLoader) {
+        const remaining = Math.max(0, 250 - (Date.now() - dashboardLoaderShownAtRef.current));
+        timer = setTimeout(() => setShowDashboardLoader(false), remaining);
+      }
+    } else {
+      timer = setTimeout(() => {
+        dashboardLoaderShownAtRef.current = Date.now();
+        setShowDashboardLoader(true);
+      }, 200);
     }
+    return () => clearTimeout(timer);
+  }, [status, statusError, showDashboardLoader]);
+
+  useEffect(() => {
+    let timer;
+    if (dashboardRefreshing) {
+      timer = setTimeout(() => {
+        dashboardUpdatingShownAtRef.current = Date.now();
+        setShowDashboardUpdating(true);
+      }, 500);
+    } else if (showDashboardUpdating) {
+      const remaining = Math.max(0, 250 - (Date.now() - dashboardUpdatingShownAtRef.current));
+      timer = setTimeout(() => setShowDashboardUpdating(false), remaining);
+    }
+    return () => clearTimeout(timer);
+  }, [dashboardRefreshing, showDashboardUpdating]);
+
+  useEffect(() => {
+    if (!sourcePending) {
+      setShowSourcePending(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowSourcePending(true), 450);
+    return () => clearTimeout(timer);
+  }, [sourcePending]);
+
+  const fetchData = async () => {
+    if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
+    const controller = new AbortController();
+    dashboardAbortRef.current = controller;
+    if (statusVerifiedRef.current) setDashboardRefreshing(true);
+
+    const statusRequest = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/status`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Status request failed');
+        const data = await response.json();
+        if (controller.signal.aborted) return;
+        setStatus(data.nepa);
+        setPowerSource(data.source);
+        setEventsToday(data.events_today ?? 0);
+        setStatusError("");
+        setLastSynced(new Date());
+        statusVerifiedRef.current = true;
+      } catch {
+        if (!controller.signal.aborted) setStatusError("Live status unavailable");
+      }
+    };
+
+    const logsRequest = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/logs`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Recent activity request failed');
+        const data = await response.json();
+        if (controller.signal.aborted) return;
+        setLogs(data);
+        setLogsError("");
+      } catch {
+        if (!controller.signal.aborted) setLogsError("Recent activity unavailable");
+      }
+    };
+
+    await Promise.allSettled([statusRequest(), logsRequest()]);
+    if (!controller.signal.aborted) setDashboardRefreshing(false);
   }
 
   const fetchTodayAnalytics = async () => {
@@ -99,6 +181,7 @@ function App() {
       const todayStr = `${year}-${month}-${day}`;
 
       const res = await fetch(`${API_URL}/api/analytics/master?date=${todayStr}&timeframe=day`);
+      if (!res.ok) throw new Error('Analytics request failed');
       const data = await res.json();
       setTodayTrend(data.trend || []);
     } catch (e) {
@@ -130,13 +213,16 @@ function App() {
       clearInterval(fastInterval);
       clearInterval(slowInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
     };
   }, []);
 
   // --- PREMIUM AUTH FLOW ---
   const handleSourceChange = (newSource) => {
+    if (sourcePendingRef.current || newSource === powerSource) return;
     const token = localStorage.getItem("adminToken");
     setAuthError(""); // Clear any old errors
+    setSourceError("");
     if (!token) {
       setPendingSource(newSource);
       setIsAuthModalOpen(true);
@@ -146,27 +232,40 @@ function App() {
   };
 
   const executeSourceChange = async (newSource, token) => {
-    // Optimistic UI Update disabled here to ensure we don't switch if unauthorized
-    const res = await fetch(`${API_URL}/api/source`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Admin-Token': token
-      },
-      body: JSON.stringify({ source: newSource })
-    });
-    
-    if (res.status === 403) {
-      localStorage.removeItem("adminToken");
-      setAuthError("Invalid or expired password"); // Set the error for the modal
-      setPendingSource(newSource);
-      setIsAuthModalOpen(true);
-    } else {
-      setAuthError("");
-      setIsAuthModalOpen(false);
-      setPowerSource(newSource);
-      setPendingSource(null);
-      await fetchData();
+    if (sourcePendingRef.current) return;
+    sourcePendingRef.current = true;
+    setSourcePending(true);
+    setSourceError("");
+    try {
+      const res = await fetch(`${API_URL}/api/source`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Token': token
+        },
+        body: JSON.stringify({ source: newSource })
+      });
+
+      if (res.status === 403) {
+        localStorage.removeItem("adminToken");
+        setAuthError("Invalid or expired password");
+        setPendingSource(newSource);
+        setIsAuthModalOpen(true);
+      } else if (res.ok) {
+        setAuthError("");
+        setIsAuthModalOpen(false);
+        setPowerSource(newSource);
+        setPendingSource(null);
+        sessionStorage.setItem('nepa-analytics-revision', String(Date.now()));
+        await fetchData();
+      } else {
+        setSourceError("Unable to change source. Please try again.");
+      }
+    } catch {
+      setSourceError("Unable to change source. Check the connection and retry.");
+    } finally {
+      sourcePendingRef.current = false;
+      setSourcePending(false);
     }
   };
 
@@ -181,10 +280,9 @@ function App() {
     localStorage.setItem('nepa-dark-mode', JSON.stringify(nextMode));
   };
 
-  const todayLogsCount = logs.filter(l => new Date(l.timestamp).toDateString() === new Date().toDateString()).length;
-  
-  const lastUpdate = logs.length > 0 
-    ? new Date(logs[0].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
+  const displayStatus = status || (statusError ? 'UNAVAILABLE' : 'SYNCING...');
+  const lastSyncedLabel = lastSynced
+    ? lastSynced.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
     : '--:--';
 
   return (
@@ -204,7 +302,10 @@ function App() {
             </div>
             
             <div className="flex items-center gap-2 lg:gap-3">
-              <button onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
+              {showDashboardUpdating && (
+                <span role="status" aria-live="polite" className="text-[9px] font-bold uppercase tracking-widest text-blue-500">Updating...</span>
+              )}
+              <button aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
                 {darkMode ? <Sun size={14} /> : <Moon size={14} />}
               </button>
               
@@ -219,38 +320,56 @@ function App() {
         <main className="max-w-[1600px] mx-auto p-4 lg:p-8">
           <Routes>
             <Route path="/" element={
-              <div className="grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] border-y lg:border border-slate-200 dark:border-slate-800 lg:rounded-xl overflow-hidden shadow-xl dark:shadow-2xl">
+              <div className="relative grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] border-y lg:border border-slate-200 dark:border-slate-800 lg:rounded-xl overflow-hidden shadow-xl dark:shadow-2xl">
+                {showDashboardLoader && (
+                  <div role="status" aria-live="polite" className="absolute inset-0 z-40 grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] p-6 gap-6">
+                    <span className="sr-only">Loading live dashboard</span>
+                    <div className="lg:col-span-4 space-y-4">
+                      <div className="h-56 bg-slate-100 dark:bg-slate-900 animate-pulse" />
+                      <div className="h-20 bg-slate-100 dark:bg-slate-900 animate-pulse" />
+                    </div>
+                    <div className="lg:col-span-8 space-y-4">
+                      <div className="h-8 w-48 bg-slate-200 dark:bg-slate-800 animate-pulse" />
+                      <div className="h-72 bg-slate-100 dark:bg-slate-900 animate-pulse" />
+                    </div>
+                  </div>
+                )}
                 
                 {/* LEFT COLUMN */}
                 <div className="lg:col-span-4 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800">
                   
                   {/* STATUS CARD */}
                   <div className={`p-6 lg:p-8 transition-all duration-1000 relative overflow-hidden flex flex-col items-center justify-center min-h-[260px] border-b border-slate-200 dark:border-slate-800 ${
-                    status === 'ON' ? 'bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-900/10 dark:via-[#020617] dark:to-[#020617]' : 
-                    status === 'OFF' ? 'bg-gradient-to-br from-slate-100 to-white dark:from-slate-800/20 dark:via-[#020617] dark:to-[#020617]' : 
-                    status === 'SYNCING...' ? 'bg-gradient-to-br from-blue-50 to-white dark:from-blue-900/10 dark:via-[#020617] dark:to-[#020617]' :
+                    displayStatus === 'ON' ? 'bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-900/10 dark:via-[#020617] dark:to-[#020617]' :
+                    displayStatus === 'OFF' ? 'bg-gradient-to-br from-slate-100 to-white dark:from-slate-800/20 dark:via-[#020617] dark:to-[#020617]' :
+                    displayStatus === 'SYNCING...' ? 'bg-gradient-to-br from-blue-50 to-white dark:from-blue-900/10 dark:via-[#020617] dark:to-[#020617]' :
                     'bg-gradient-to-br from-red-50 to-white dark:from-red-900/10 dark:via-[#020617] dark:to-[#020617]'
                   }`}>
                     <div className="absolute top-0 right-0 p-6 opacity-5">
-                      <Zap size={100} className={status === 'ON' ? 'text-emerald-500' : 'text-slate-400 dark:text-slate-600'} />
+                      <Zap size={100} className={displayStatus === 'ON' ? 'text-emerald-500' : 'text-slate-400 dark:text-slate-600'} />
                     </div>
                     
                     <p className="text-slate-400 dark:text-slate-500 mb-3 font-black tracking-[0.3em] text-[9px] uppercase relative z-10">Live Connection Status</p>
                     <h2 className={`text-5xl font-black tracking-tighter transition-all relative z-10 ${
-                      status === 'ON' ? 'text-emerald-500 dark:text-emerald-400 drop-shadow-[0_0_15px_rgba(16,185,129,0.2)]' : 
-                      status === 'OFF' ? 'text-slate-400 dark:text-slate-600' : 
-                      status === 'SYNCING...' ? 'text-blue-500 dark:text-blue-400' :
+                      displayStatus === 'ON' ? 'text-emerald-500 dark:text-emerald-400 drop-shadow-[0_0_15px_rgba(16,185,129,0.2)]' :
+                      displayStatus === 'OFF' ? 'text-slate-400 dark:text-slate-600' :
+                      displayStatus === 'SYNCING...' ? 'text-blue-500 dark:text-blue-400' :
                       'text-red-500 dark:text-red-400'
                     }`}>
-                      {status}
+                      {displayStatus}
                     </h2>
+                    {statusError && status !== null && (
+                      <p role="alert" className="mt-2 text-center text-[9px] font-bold text-red-500 relative z-10">Refresh failed — showing last verified status</p>
+                    )}
                     
                     <div className="mt-6 w-full max-w-[240px] relative z-10">
                       <p className="text-center text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Source Override</p>
                       <div className="flex bg-slate-100 dark:bg-slate-900 p-1 border border-slate-200 dark:border-slate-800 rounded-xl">
-                        <button onClick={() => handleSourceChange('NEPA')} className={`flex-1 py-2 text-[9px] font-black tracking-widest transition-all duration-500 rounded-lg ${powerSource === 'NEPA' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800'}`}>NEPA</button>
-                        <button onClick={() => handleSourceChange('GEN')} className={`flex-1 py-2 text-[9px] font-black tracking-widest transition-all duration-500 rounded-lg ${powerSource === 'GEN' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800'}`}>GEN</button>
+                        <button disabled={sourcePending || !powerSource} aria-pressed={powerSource === 'NEPA'} onClick={() => handleSourceChange('NEPA')} className={`flex-1 py-2 text-[9px] font-black tracking-widest transition-all duration-500 rounded-lg disabled:opacity-50 ${powerSource === 'NEPA' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800'}`}>NEPA</button>
+                        <button disabled={sourcePending || !powerSource} aria-pressed={powerSource === 'GEN'} onClick={() => handleSourceChange('GEN')} className={`flex-1 py-2 text-[9px] font-black tracking-widest transition-all duration-500 rounded-lg disabled:opacity-50 ${powerSource === 'GEN' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800'}`}>GEN</button>
                       </div>
+                      {showSourcePending && <p role="status" aria-live="polite" className="mt-2 text-center text-[9px] font-bold uppercase tracking-widest text-blue-500">Applying source...</p>}
+                      {sourceError && <p role="alert" className="mt-2 text-center text-[9px] font-bold text-red-500">{sourceError}</p>}
                     </div>
                   </div>
 
@@ -259,12 +378,12 @@ function App() {
                     <div className="p-4 lg:p-5 relative overflow-hidden flex flex-col justify-center border-r border-slate-200 dark:border-slate-800">
                       <Activity size={16} className="text-blue-500 mb-2" />
                       <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Events Today</p>
-                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{todayLogsCount}</p>
+                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{eventsToday ?? '--'}</p>
                     </div>
                     <div className="p-4 lg:p-5 relative overflow-hidden flex flex-col justify-center">
                       <Clock size={16} className="text-amber-500 mb-2" />
-                      <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Last Update</p>
-                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{lastUpdate}</p>
+                      <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Last Synced</p>
+                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{lastSyncedLabel}</p>
                     </div>
                   </div>
 
@@ -308,7 +427,9 @@ function App() {
                   <div className="p-6 lg:p-8 flex items-center justify-between border-b border-slate-100 dark:border-slate-800/50">
                     <div>
                       <h3 className="text-xl font-black tracking-tight text-slate-900 dark:text-white uppercase">Activity Timeline</h3>
-                      <p className="text-slate-500 text-[10px] font-bold tracking-widest uppercase mt-1">Log of Time-Out Events</p>
+                      <p className={`text-[10px] font-bold tracking-widest uppercase mt-1 ${logsError ? 'text-red-500' : 'text-slate-500'}`} role={logsError ? 'alert' : undefined}>
+                        {logsError || 'Log of Time-Out Events'}
+                      </p>
                     </div>
                     <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-900 px-3 py-1.5 border border-slate-200 dark:border-slate-800 rounded-lg">
                       <Clock size={14} className="text-blue-600 dark:text-blue-500" />
@@ -319,7 +440,7 @@ function App() {
                   {logs.length === 0 ? (
                     <div className="flex flex-col items-center justify-center flex-1 py-16 opacity-30 dark:opacity-20">
                       <ZapOff size={48} className="text-slate-800 dark:text-slate-200" />
-                      <p className="mt-4 font-bold tracking-widest uppercase text-xs text-slate-800 dark:text-slate-200">No Records Found</p>
+                      <p className="mt-4 font-bold tracking-widest uppercase text-xs text-slate-800 dark:text-slate-200">{logsError || 'No Records Found'}</p>
                     </div>
                   ) : (
                     <div className="flex flex-col flex-1">
@@ -403,8 +524,8 @@ function App() {
               </div>
             } />
             
-            <Route path="/calendar" element={<Analytics darkMode={darkMode} />} />
-            <Route path="/history" element={<History darkMode={darkMode} />} />
+            <Route path="/calendar" element={<Suspense fallback={<DelayedRouteFallback />}><Analytics darkMode={darkMode} /></Suspense>} />
+            <Route path="/history" element={<Suspense fallback={<DelayedRouteFallback />}><History darkMode={darkMode} /></Suspense>} />
           </Routes>
         </main>
 
@@ -413,6 +534,8 @@ function App() {
           onClose={() => setIsAuthModalOpen(false)}
           onSubmit={submitPassword}
           error={authError}
+          pending={sourcePending}
+          showPending={showSourcePending}
         />
 
       </div>
