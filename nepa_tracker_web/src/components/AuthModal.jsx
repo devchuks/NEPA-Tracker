@@ -6,6 +6,8 @@ export default function AuthModal({
   onClose, 
   onSubmit, 
   error, 
+  pending = false,
+  showPending = false,
   title = "Admin Access", 
   message = "Enter password to authorize changes." 
 }) {
@@ -39,7 +41,8 @@ export default function AuthModal({
             autoFocus
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && password && onSubmit(password)}
+            disabled={pending}
+            onKeyDown={(e) => e.key === 'Enter' && password && !pending && onSubmit(password)}
             className={`w-full bg-slate-50 dark:bg-slate-900 border ${error ? 'border-red-500 dark:border-red-500' : 'border-slate-200 dark:border-slate-800 focus:border-blue-500 dark:focus:border-blue-500'} text-slate-900 dark:text-white p-4 pr-12 text-sm font-black outline-none transition-colors tracking-widest`}
             placeholder="••••••••"
           />
@@ -63,18 +66,20 @@ export default function AuthModal({
         <div className="flex gap-3 mt-8">
           <button 
             onClick={onClose} 
-            className="flex-1 py-3 border border-slate-200 dark:border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 transition-all"
+            disabled={pending}
+            className="flex-1 py-3 border border-slate-200 dark:border-slate-800 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 transition-all disabled:opacity-50"
           >
             Cancel
           </button>
           <button 
-            onClick={() => password && onSubmit(password)} 
-            disabled={!password}
+            onClick={() => password && !pending && onSubmit(password)}
+            disabled={!password || pending}
             className="flex-1 py-3 bg-blue-600 text-white font-black text-[10px] uppercase tracking-widest shadow-lg shadow-blue-600/20 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 transition-all"
           >
-            Authorize
+            {showPending ? 'Authorizing...' : 'Authorize'}
           </button>
         </div>
+        {showPending && <p role="status" aria-live="polite" className="text-center text-[9px] font-bold uppercase tracking-widest text-blue-500 mt-3">Applying changes...</p>}
 
       </div>
     </div>

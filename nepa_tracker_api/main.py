@@ -9,7 +9,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Optional, Literal
 import calendar
 from calendar import monthrange
@@ -57,47 +57,39 @@ def verify_admin(token: str = Security(header_scheme)):
         raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing token")
     return token
 
-# --- EVENT BUS ARCHITECTURE ---
-class EventBus:
-    def __init__(self):
-        self._subscribers = {}
-
-    def subscribe(self, event_type: str, handler):
-        if event_type not in self._subscribers:
-            self._subscribers[event_type] = []
-        self._subscribers[event_type].append(handler)
-
-    def emit(self, event_type: str, *args, **kwargs):
-        for handler in self._subscribers.get(event_type, []):
-            asyncio.create_task(handler(*args, **kwargs))
-
-bus = EventBus()
-
 # --- ASYNC WATCHDOG TIMER ---
 class WatchdogTimer:
     def __init__(self, timeout=75):
         self.timeout = timeout
         self.task = None
         self.last_ping_time = datetime.min
+        self.generation = 0
 
-    async def _countdown(self, scheduled_ping_time: datetime):
+    async def _countdown(self, scheduled_ping_time: datetime, generation: int, death_time: datetime, delay: float):
         try:
-            await asyncio.sleep(self.timeout)
-            
-            # RACE CONDITION KILLER: If a newer ping arrived while we were sleeping, abort!
-            if self.last_ping_time > scheduled_ping_time:
-                return
-                
-            death_time = scheduled_ping_time + timedelta(seconds=self.timeout)
-            bus.emit("POWER_LOST", death_time)
+            await asyncio.sleep(delay)
+            await handle_power_lost(scheduled_ping_time, generation, death_time)
         except asyncio.CancelledError:
             pass
 
-    def reset(self, ping_time: datetime):
+    def record_ping(self, ping_time: datetime) -> int:
+        """Synchronously invalidate every watchdog created by an older ping."""
         self.last_ping_time = ping_time
+        self.generation += 1
         if self.task and not self.task.done():
             self.task.cancel()
-        self.task = asyncio.create_task(self._countdown(ping_time))
+        return self.generation
+
+    def arm(self, ping_time: datetime, generation: int, death_time: Optional[datetime] = None, delay: Optional[float] = None):
+        if generation != self.generation or ping_time != self.last_ping_time:
+            return
+        death_time = death_time or ping_time + timedelta(seconds=self.timeout)
+        delay = self.timeout if delay is None else max(0, delay)
+        self.task = asyncio.create_task(self._countdown(ping_time, generation, death_time, delay))
+
+    def reset(self, ping_time: datetime, death_time: Optional[datetime] = None):
+        generation = self.record_ping(ping_time)
+        self.arm(ping_time, generation, death_time)
 
 watchdog = WatchdogTimer()
 
@@ -128,11 +120,20 @@ async def handle_ping(timestamp: datetime):
                 else:
                     db.commit()
 
-async def handle_power_lost(death_time: datetime):
+async def handle_power_lost(expected_ping_time: datetime, generation: int, death_time: datetime):
     async with state_lock:
         with SessionLocal() as db:
             status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-            if status and status.is_online:
+            # Cancellation alone is insufficient: an obsolete countdown may already
+            # be awake and waiting for this lock. Revalidate the timeout at the write.
+            timeout_is_current = (
+                generation == watchdog.generation
+                and expected_ping_time == watchdog.last_ping_time
+                and status
+                and status.is_online
+                and status.last_ping == expected_ping_time
+            )
+            if timeout_is_current:
                 status.is_online = False
                 db.add(PowerLog(event="OFF", source=None, timestamp=death_time))
                 db.commit()
@@ -144,17 +145,17 @@ async def handle_source_change(new_source: str):
     async with state_lock:
         with SessionLocal() as db:
             status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-            if status:
-                status.source = new_source
-                
-            last_log = db.query(PowerLog).order_by(PowerLog.timestamp.desc()).first()
-            if last_log and last_log.event == "ON":
-                last_log.source = new_source
-            db.commit()
+            if not status or status.source == new_source:
+                return
 
-bus.subscribe("PING_RECEIVED", handle_ping)
-bus.subscribe("POWER_LOST", handle_power_lost)
-bus.subscribe("SOURCE_CHANGED", handle_source_change)
+            status.source = new_source
+            if status.is_online:
+                current_on_log = db.query(PowerLog).filter(
+                    PowerLog.event == "ON"
+                ).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
+                if current_on_log:
+                    current_on_log.source = new_source
+            db.commit()
 
 # --- FASTAPI APP ---
 @asynccontextmanager
@@ -162,11 +163,10 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
         if status and status.is_online:
-            elapsed = (datetime.now() - status.last_ping).total_seconds()
-            if elapsed > watchdog.timeout:
-                bus.emit("POWER_LOST", status.last_ping + timedelta(seconds=watchdog.timeout))
-            else:
-                watchdog.reset(status.last_ping)
+            # A restart cannot prove power was lost while the backend was absent.
+            # Give the stored ON state one normal heartbeat window to recover.
+            startup_deadline = datetime.now() + timedelta(seconds=watchdog.timeout)
+            watchdog.reset(status.last_ping, death_time=startup_deadline)
     yield
     if watchdog.task: watchdog.task.cancel()
 
@@ -194,9 +194,17 @@ class SourceToggle(BaseModel):
     source: Literal["NEPA", "GEN"] # Security Fix: Input validation
 
 class LogEntry(BaseModel):
-    event: str
-    source: Optional[str] = None
+    event: Literal["ON", "OFF"]
+    source: Optional[Literal["NEPA", "GEN"]] = None
     timestamp: datetime
+
+    @model_validator(mode="after")
+    def validate_event_source(self):
+        if self.event == "ON" and self.source is None:
+            raise ValueError("ON events require source NEPA or GEN")
+        if self.event == "OFF" and self.source is not None:
+            raise ValueError("OFF events must not include a source")
+        return self
 
 class BulkDelete(BaseModel):
     log_ids: list[int]
@@ -209,20 +217,50 @@ def health_check():
 @app.post("/api/ping", dependencies=[Depends(verify_admin)])
 async def receive_ping():
     now = datetime.now()
-    watchdog.reset(now)
-    bus.emit("PING_RECEIVED", now)
-    return {"message": "Event Dispatched: Ping"}
+    previous_ping = watchdog.last_ping_time
+    generation = watchdog.record_ping(now)
+    try:
+        await handle_ping(now)
+    except Exception:
+        # Do not leave an online state permanently unmonitored if persisting the
+        # newly observed heartbeat fails after the old watchdog was invalidated.
+        persisted_ping = previous_ping
+        try:
+            with SessionLocal() as db:
+                status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+                if status and status.is_online:
+                    persisted_ping = status.last_ping
+        finally:
+            if persisted_ping != datetime.min:
+                death_time = persisted_ping + timedelta(seconds=watchdog.timeout)
+                remaining = (death_time - datetime.now()).total_seconds()
+                recovery_generation = watchdog.record_ping(persisted_ping)
+                watchdog.arm(persisted_ping, recovery_generation, death_time, remaining)
+        raise
+    watchdog.arm(now, generation)
+    return {"message": "Ping received"}
 
 @app.post("/api/source", dependencies=[Depends(verify_admin)])
 async def toggle_source(data: SourceToggle):
-    bus.emit("SOURCE_CHANGED", data.source)
-    return {"message": "Event Dispatched: Source Change", "source": data.source}
+    await handle_source_change(data.source)
+    return {"message": "Source updated", "source": data.source}
 
 @app.get("/api/status")
 def get_status(db: Session = Depends(get_db)):
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    events_today = db.query(PowerLog).filter(
+        PowerLog.event.in_(("ON", "OFF")),
+        PowerLog.timestamp >= today_start,
+        PowerLog.timestamp < today_start + timedelta(days=1)
+    ).count()
     status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
-    if not status: return {"nepa": "OFF", "source": "NEPA"}
-    return {"nepa": "ON" if status.is_online else "OFF", "source": status.source}
+    if not status:
+        return {"nepa": "OFF", "source": "NEPA", "events_today": events_today}
+    return {
+        "nepa": "ON" if status.is_online else "OFF",
+        "source": status.source,
+        "events_today": events_today
+    }
 
 # --- ANALYTICS ENDPOINTS ---
 @app.get("/api/logs")
@@ -231,6 +269,9 @@ def get_logs(db: Session = Depends(get_db)):
 
 @app.get("/api/analytics/master")
 def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depends(get_db)):
+    if timeframe not in {"day", "week", "month", "year"}:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+
     try:
         target_dt = datetime.strptime(date, "%Y-%m-%d")
         
@@ -250,21 +291,35 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
             
         now = datetime.now()
         math_end_dt = min(end_dt, now)
+
+        if math_end_dt <= start_dt:
+            return {
+                "trend": [],
+                "distribution": [
+                    {"name": "Grid", "value": 0, "color": "#ec4899"},
+                    {"name": "Gen", "value": 0, "color": "#f59e0b"},
+                    {"name": "Off", "value": 0, "color": "#94a3b8"}
+                ],
+                "kpis": {"uptime": "--", "grid_hours": "0h", "outages": 0}
+            }
             
-        initial_log = db.query(PowerLog).filter(PowerLog.timestamp <= start_dt).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
+        initial_log = db.query(PowerLog).filter(PowerLog.timestamp < start_dt).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
         logs = db.query(PowerLog).filter(PowerLog.timestamp >= start_dt, PowerLog.timestamp < math_end_dt).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
         
         timeline = []
-        if initial_log:
+        if logs and logs[0].timestamp == start_dt:
+            timeline.extend(logs)
+        elif initial_log:
             timeline.append(PowerLog(event=initial_log.event, source=initial_log.source, timestamp=start_dt))
+            timeline.extend(logs)
         else:
             timeline.append(PowerLog(event="OFF", source="OFFLINE", timestamp=start_dt))
-            
-        timeline.extend(logs)
+            timeline.extend(logs)
         timeline.append(PowerLog(event="END", source="END", timestamp=math_end_dt)) 
         
         stats = {"NEPA": 0, "GEN": 0, "OFF": 0}
         trend = []
+        outage_count = sum(1 for log in logs if log.event == "OFF")
         
         if timeframe == "day":
             for i in range(len(timeline) - 1):
@@ -283,7 +338,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                 
             last = timeline[-2]
             trend.append({
-                "time": "23:59", 
+                "time": "NOW" if math_end_dt < end_dt else "24:00",
                 "timestamp": int(math_end_dt.timestamp() * 1000),
                 "level": 1 if last.event=="ON" else 0, 
                 "status": last.source if last.event=="ON" else "OFFLINE"
@@ -307,7 +362,6 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                     month_end = month_start + timedelta(days=days)
                     buckets.append({"name": calendar.month_abbr[i+1][0], "start": month_start, "end": month_end, "Grid": 0, "Gen": 0})
 
-            outage_count = 0
             for i in range(len(timeline) - 1):
                 curr, nxt = timeline[i], timeline[i+1]
                 if curr.event == "ON":
@@ -330,14 +384,14 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
                             elif curr.source == "GEN": b["Gen"] += dur
                 else:
                     stats["OFF"] += (nxt.timestamp - curr.timestamp).total_seconds() / 3600
-                    if curr.timestamp >= start_dt:
-                        outage_count += 1
 
             for b in buckets:
+                observed_end = min(b["end"], math_end_dt)
                 trend.append({
                     "name": b["name"],
                     "Grid": round(b["Grid"], 1),
-                    "Gen": round(b["Gen"], 1)
+                    "Gen": round(b["Gen"], 1),
+                    "Observed": round(max(0, (observed_end - b["start"]).total_seconds() / 3600), 1)
                 })
 
         total_hours = sum(stats.values())
@@ -353,7 +407,7 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
             "kpis": {
                 "uptime": f"{uptime_pct}%",
                 "grid_hours": f"{round(stats.get('NEPA', 0), 1)}h",
-                "outages": outage_count if timeframe != "day" else len([l for l in logs if l.event == "OFF" and l.timestamp >= start_dt and l.timestamp < math_end_dt])
+                "outages": outage_count
             }
         }
     except ValueError:
@@ -369,29 +423,43 @@ def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
     else:
         end_date = datetime(year, month + 1, 1)
 
+    now = datetime.now()
+    math_end = min(end_date, now)
+    if math_end <= start_date:
+        return {"avg_grid": "--", "frequency": "--", "uptime": "--"}
+
+    initial_log = db.query(PowerLog).filter(
+        PowerLog.timestamp < start_date
+    ).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
     logs = db.query(PowerLog).filter(
         PowerLog.timestamp >= start_date,
-        PowerLog.timestamp < end_date
+        PowerLog.timestamp < math_end
     ).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).all()
 
-    if not logs:
-        return {"avg_grid": "0h", "frequency": "0/day", "uptime": "0%"}
+    timeline = []
+    if logs and logs[0].timestamp == start_date:
+        timeline.extend(logs)
+    else:
+        timeline.append(PowerLog(
+            event=initial_log.event if initial_log else "OFF",
+            source=initial_log.source if initial_log else None,
+            timestamp=start_date
+        ))
+        timeline.extend(logs)
+    timeline.append(PowerLog(event="END", source=None, timestamp=math_end))
 
     stats = {"NEPA": 0, "GEN": 0, "OFF": 0}
-    outage_count = 0
+    outage_count = len([log for log in logs if log.event == "OFF"])
     
-    for i in range(len(logs) - 1):
-        curr, nxt = logs[i], logs[i+1]
+    for i in range(len(timeline) - 1):
+        curr, nxt = timeline[i], timeline[i+1]
         duration = (nxt.timestamp - curr.timestamp).total_seconds() / 3600
         if curr.event == "ON":
             stats[curr.source] = stats.get(curr.source, 0) + duration
         else:
             stats["OFF"] += duration
-            outage_count += 1
 
-    now = datetime.now()
-    days_passed = (now - start_date).days if now < end_date else (end_date - start_date).days
-    days_passed = max(days_passed, 1)
+    days_passed = (math_end - start_date).total_seconds() / 86400
 
     avg_grid = stats.get("NEPA", 0) / days_passed
     freq = outage_count / days_passed

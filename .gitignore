@@ -15,3 +15,4 @@ nepa_tracker_web/.env.*.local
 .DS_Store
 Thumbs.db
 structure.txt
+esp32.c
