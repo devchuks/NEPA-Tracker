@@ -24,14 +24,12 @@ export default function History({ darkMode }) {
   const limit = 20;
   const [selectedLogs, setSelectedLogs] = useState([]);
   const [initialLoading, setInitialLoading] = useState(!initialCachedPage);
-  const [showInitialLoading, setShowInitialLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
   const historyAbortRef = useRef(null);
   const historyRequestIdRef = useRef(0);
   const viewPageRef = useRef(initialCachedPage ? 1 : null);
-  const initialLoaderShownAtRef = useRef(0);
 
   // --- CRUD MODAL STATES ---
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -101,20 +99,6 @@ export default function History({ darkMode }) {
     fetchHistory();
     return () => controller.abort();
   }, [API_URL, page, reloadToken]);
-
-  useEffect(() => {
-    let timer;
-    if (initialLoading) {
-      timer = setTimeout(() => {
-        initialLoaderShownAtRef.current = Date.now();
-        setShowInitialLoading(true);
-      }, 200);
-    } else if (showInitialLoading) {
-      const remaining = Math.max(0, 250 - (Date.now() - initialLoaderShownAtRef.current));
-      timer = setTimeout(() => setShowInitialLoading(false), remaining);
-    }
-    return () => clearTimeout(timer);
-  }, [initialLoading, showInitialLoading]);
 
   useEffect(() => {
     if (!mutationPending) {
@@ -397,12 +381,6 @@ export default function History({ darkMode }) {
         </div>
 
         <div className="divide-y divide-slate-100 dark:divide-slate-800/50 relative min-h-[200px]">
-          {showInitialLoading && (
-            <div role="status" aria-live="polite" className="absolute inset-0 z-50 bg-white dark:bg-[#020617] p-5 space-y-3">
-              <span className="sr-only">Loading history</span>
-              {[0, 1, 2].map(item => <div key={item} className="h-16 bg-slate-100 dark:bg-slate-900 animate-pulse" />)}
-            </div>
-          )}
           {logs.map((log) => (
             <div key={log.id} className={`flex flex-col sm:grid sm:grid-cols-12 sm:items-center p-4 sm:p-5 transition-colors gap-3 sm:gap-0 hover:bg-slate-50 dark:hover:bg-slate-800/30 ${
               log.event === 'ON' 

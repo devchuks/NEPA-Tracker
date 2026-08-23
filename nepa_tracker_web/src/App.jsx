@@ -1,27 +1,11 @@
-import { useState, useEffect, useRef, lazy, Suspense } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, Link, useLocation } from 'react-router-dom'
-import { Activity, Calendar as CalendarIcon, ZapOff, Zap, Clock, Info, Sun, Moon } from 'lucide-react'
+import { Activity, Calendar as CalendarIcon, ZapOff, Zap, Clock, Info, Sun, Moon, LoaderCircle } from 'lucide-react'
 import AuthModal from './components/AuthModal' // <-- IMPORTED NEW COMPONENT
-
-const Analytics = lazy(() => import('./components/Analytics'));
-const History = lazy(() => import('./components/History'));
+import Analytics from './components/Analytics'
+import History from './components/History'
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-function DelayedRouteFallback() {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const timer = setTimeout(() => setVisible(true), 200);
-    return () => clearTimeout(timer);
-  }, []);
-
-  return visible ? (
-    <div role="status" aria-live="polite" className="min-h-[320px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
-      Loading page...
-    </div>
-  ) : <div className="min-h-[320px]" aria-hidden="true" />;
-}
 
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
@@ -50,14 +34,32 @@ const getRelativeDay = (timestamp) => {
 function App() {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
 
-  const [status, setStatus] = useState(null);
-  const [powerSource, setPowerSource] = useState(null);
-  const [eventsToday, setEventsToday] = useState(null);
-  const [logs, setLogs] = useState([]);
+  const [status, setStatus] = useState(() => localStorage.getItem('nepa-status'));
+  const [powerSource, setPowerSource] = useState(() => localStorage.getItem('nepa-source'));
+  const [eventsToday, setEventsToday] = useState(() => {
+    const cached = localStorage.getItem('nepa-events-today');
+    if (cached === null) return null;
+    const value = Number(cached);
+    return Number.isFinite(value) ? value : null;
+  });
+  const [logs, setLogs] = useState(() => {
+    const cached = localStorage.getItem('nepa-logs');
+    if (!cached) return [];
+    try {
+      const parsed = JSON.parse(cached);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      localStorage.removeItem('nepa-logs');
+      return [];
+    }
+  });
   const [statusError, setStatusError] = useState("");
   const [logsError, setLogsError] = useState("");
-  const [lastSynced, setLastSynced] = useState(null);
+  const [showDashboardSpinner, setShowDashboardSpinner] = useState(false);
   const dashboardAbortRef = useRef(null);
+  const dashboardRequestIdRef = useRef(0);
+  const dashboardSpinnerTimerRef = useRef(null);
+  const dashboardSpinnerVisibleRef = useRef(false);
   
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
@@ -98,6 +100,16 @@ function App() {
     if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
     const controller = new AbortController();
     dashboardAbortRef.current = controller;
+    const requestId = ++dashboardRequestIdRef.current;
+
+    if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
+    if (!dashboardSpinnerVisibleRef.current) {
+      dashboardSpinnerTimerRef.current = setTimeout(() => {
+        if (requestId !== dashboardRequestIdRef.current || controller.signal.aborted) return;
+        dashboardSpinnerVisibleRef.current = true;
+        setShowDashboardSpinner(true);
+      }, 175);
+    }
 
     const statusRequest = async () => {
       try {
@@ -108,8 +120,10 @@ function App() {
         setStatus(data.nepa);
         setPowerSource(data.source);
         setEventsToday(data.events_today ?? 0);
+        localStorage.setItem('nepa-status', data.nepa);
+        localStorage.setItem('nepa-source', data.source);
+        localStorage.setItem('nepa-events-today', String(data.events_today ?? 0));
         setStatusError("");
-        setLastSynced(new Date());
       } catch {
         if (!controller.signal.aborted) setStatusError("Live status unavailable");
       }
@@ -122,6 +136,7 @@ function App() {
         const data = await response.json();
         if (controller.signal.aborted) return;
         setLogs(data);
+        localStorage.setItem('nepa-logs', JSON.stringify(data));
         setLogsError("");
       } catch {
         if (!controller.signal.aborted) setLogsError("Recent activity unavailable");
@@ -129,6 +144,12 @@ function App() {
     };
 
     await Promise.allSettled([statusRequest(), logsRequest()]);
+    if (requestId === dashboardRequestIdRef.current) {
+      if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
+      dashboardSpinnerTimerRef.current = null;
+      dashboardSpinnerVisibleRef.current = false;
+      setShowDashboardSpinner(false);
+    }
   }
 
   const fetchTodayAnalytics = async () => {
@@ -173,6 +194,7 @@ function App() {
       clearInterval(slowInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
+      if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
     };
   }, []);
 
@@ -239,9 +261,9 @@ function App() {
     localStorage.setItem('nepa-dark-mode', JSON.stringify(nextMode));
   };
 
-  const displayStatus = status || (statusError ? 'UNAVAILABLE' : 'SYNCING...');
-  const lastSyncedLabel = lastSynced
-    ? lastSynced.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+  const displayStatus = status || (statusError ? 'UNAVAILABLE' : '--');
+  const lastUpdate = logs.length > 0
+    ? new Date(logs[0].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
     : '--:--';
 
   return (
@@ -261,6 +283,9 @@ function App() {
             </div>
             
             <div className="flex items-center gap-2 lg:gap-3">
+              <span className="w-4 h-4 flex items-center justify-center shrink-0" aria-hidden={!(showDashboardSpinner && location.pathname === '/')}>
+                {showDashboardSpinner && location.pathname === '/' && <LoaderCircle aria-label="Refreshing live data" className="animate-spin text-blue-500" size={14} />}
+              </span>
               <button aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
                 {darkMode ? <Sun size={14} /> : <Moon size={14} />}
               </button>
@@ -284,8 +309,8 @@ function App() {
                   <div className={`p-6 lg:p-8 transition-all duration-1000 relative overflow-hidden flex flex-col items-center justify-center min-h-[260px] border-b border-slate-200 dark:border-slate-800 ${
                     displayStatus === 'ON' ? 'bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-900/10 dark:via-[#020617] dark:to-[#020617]' :
                     displayStatus === 'OFF' ? 'bg-gradient-to-br from-slate-100 to-white dark:from-slate-800/20 dark:via-[#020617] dark:to-[#020617]' :
-                    displayStatus === 'SYNCING...' ? 'bg-gradient-to-br from-blue-50 to-white dark:from-blue-900/10 dark:via-[#020617] dark:to-[#020617]' :
-                    'bg-gradient-to-br from-red-50 to-white dark:from-red-900/10 dark:via-[#020617] dark:to-[#020617]'
+                    displayStatus === 'UNAVAILABLE' ? 'bg-gradient-to-br from-red-50 to-white dark:from-red-900/10 dark:via-[#020617] dark:to-[#020617]' :
+                    'bg-gradient-to-br from-slate-50 to-white dark:from-slate-900/30 dark:via-[#020617] dark:to-[#020617]'
                   }`}>
                     <div className="absolute top-0 right-0 p-6 opacity-5">
                       <Zap size={100} className={displayStatus === 'ON' ? 'text-emerald-500' : 'text-slate-400 dark:text-slate-600'} />
@@ -295,8 +320,8 @@ function App() {
                     <h2 className={`text-5xl font-black tracking-tighter transition-all relative z-10 ${
                       displayStatus === 'ON' ? 'text-emerald-500 dark:text-emerald-400 drop-shadow-[0_0_15px_rgba(16,185,129,0.2)]' :
                       displayStatus === 'OFF' ? 'text-slate-400 dark:text-slate-600' :
-                      displayStatus === 'SYNCING...' ? 'text-blue-500 dark:text-blue-400' :
-                      'text-red-500 dark:text-red-400'
+                      displayStatus === 'UNAVAILABLE' ? 'text-red-500 dark:text-red-400' :
+                      'text-slate-400 dark:text-slate-600'
                     }`}>
                       {displayStatus}
                     </h2>
@@ -324,8 +349,8 @@ function App() {
                     </div>
                     <div className="p-4 lg:p-5 relative overflow-hidden flex flex-col justify-center">
                       <Clock size={16} className="text-amber-500 mb-2" />
-                      <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Last Synced</p>
-                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{lastSyncedLabel}</p>
+                      <p className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Last Update</p>
+                      <p className="text-xl font-black text-slate-900 dark:text-white mt-1">{lastUpdate}</p>
                     </div>
                   </div>
 
@@ -466,8 +491,8 @@ function App() {
               </div>
             } />
             
-            <Route path="/calendar" element={<Suspense fallback={<DelayedRouteFallback />}><Analytics darkMode={darkMode} /></Suspense>} />
-            <Route path="/history" element={<Suspense fallback={<DelayedRouteFallback />}><History darkMode={darkMode} /></Suspense>} />
+            <Route path="/calendar" element={<Analytics darkMode={darkMode} />} />
+            <Route path="/history" element={<History darkMode={darkMode} />} />
           </Routes>
         </main>
 
