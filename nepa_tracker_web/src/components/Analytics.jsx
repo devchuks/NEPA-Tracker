@@ -94,30 +94,18 @@ export default function Analytics({ darkMode }) {
   const [viewDate, setViewDate] = useState(selectedDate);
   const [timeframe, setTimeframe] = useState('day'); 
   const [viewTimeframe, setViewTimeframe] = useState('day'); 
-  const selectedCacheKey = masterCacheKey(selectedDate, timeframe);
-  const initialCachedData = masterCache.get(selectedCacheKey);
-  const [data, setData] = useState(initialCachedData || EMPTY_ANALYTICS);
-  const [loadedCacheKey, setLoadedCacheKey] = useState(initialCachedData ? selectedCacheKey : null);
-  const initialMonthlyCacheKey = `monthStats-${selectedDate.getFullYear()}-${selectedDate.getMonth() + 1}`;
-  const initialMonthlyStats = monthlyCache.get(initialMonthlyCacheKey);
-  const [monthlyStats, setMonthlyStats] = useState(initialMonthlyStats || EMPTY_MONTHLY_STATS);
-  const [loadedMonthlyCacheKey, setLoadedMonthlyCacheKey] = useState(initialMonthlyStats ? initialMonthlyCacheKey : null);
-  const [initialLoading, setInitialLoading] = useState(() => !initialCachedData);
-  const [showInitialLoading, setShowInitialLoading] = useState(false);
-  const [analyticsError, setAnalyticsError] = useState("");
-  const [monthlyError, setMonthlyError] = useState("");
+  const [data, setData] = useState({
+    trend: [], distribution: [], kpis: { uptime: '0%', grid_hours: '0h', outages: '0' }
+  });
+  const [monthlyStats, setMonthlyStats] = useState({ avg_grid: '--', frequency: '--', uptime: '--' });
+  const [isLoading, setIsLoading] = useState(true);
 
-  const masterAbortRef = useRef(null);
-  const monthlyAbortRef = useRef(null);
-  const masterRequestIdRef = useRef(0);
-  const monthlyRequestIdRef = useRef(0);
-  const initialLoaderShownAtRef = useRef(0);
-  const hasRenderedDataRef = useRef(Boolean(initialCachedData));
-  const preserveAnalyticsErrorRef = useRef(false);
-  const renderedViewRef = useRef({ date: selectedDate, timeframe: 'day' });
+  const cache = useRef({});
+  const abortControllerRef = useRef(null);
+  const isInitialLoad = useRef(true);
 
-  const currentYear = viewDate.getFullYear();
-  const currentMonth = viewDate.getMonth() + 1;
+  const currentYear = selectedDate.getFullYear();
+  const currentMonth = selectedDate.getMonth() + 1;
 
   const getFormattedDateRange = () => {
     const d = viewDate;
@@ -154,9 +142,9 @@ export default function Analytics({ darkMode }) {
   const handleChartClick = (state) => {
     if (!state || state.activeTooltipIndex === undefined) return;
     if (viewTimeframe === 'week') {
-      const startOfWeek = new Date(viewDate);
-      const currentDay = viewDate.getDay() === 0 ? 7 : viewDate.getDay();
-      startOfWeek.setDate(viewDate.getDate() - currentDay + 1);
+      const startOfWeek = new Date(selectedDate);
+      const currentDay = selectedDate.getDay() === 0 ? 7 : selectedDate.getDay();
+      startOfWeek.setDate(selectedDate.getDate() - currentDay + 1);
       
       const targetDate = new Date(startOfWeek);
       targetDate.setDate(startOfWeek.getDate() + Number(state.activeTooltipIndex));
@@ -211,110 +199,62 @@ export default function Analytics({ darkMode }) {
   }, [API_URL, currentYear, currentMonth]);
 
   useEffect(() => {
-    const requestYear = selectedDate.getFullYear();
-    const requestMonth = selectedDate.getMonth() + 1;
-    const formattedMonth = String(requestMonth).padStart(2, '0');
-    const formattedDay = String(selectedDate.getDate()).padStart(2, '0');
-    const dateStr = `${requestYear}-${formattedMonth}-${formattedDay}`;
-    const cacheKey = masterCacheKey(selectedDate, timeframe);
-    const isCurrentPeriod = periodContainsNow(selectedDate, timeframe);
-    const cached = masterCache.get(cacheKey);
-    const isUncachedNavigation = !cached && hasRenderedDataRef.current;
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
 
-    if (preserveAnalyticsErrorRef.current) {
-      preserveAnalyticsErrorRef.current = false;
-    } else {
-      setAnalyticsError("");
-    }
-    if (cached) {
-      setData(cached);
-      setLoadedCacheKey(cacheKey);
-      hasRenderedDataRef.current = true;
-      renderedViewRef.current = { date: selectedDate, timeframe };
+    const formattedMonth = String(currentMonth).padStart(2, '0');
+    const formattedDay = String(selectedDate.getDate()).padStart(2, '0');
+    const dateStr = `${currentYear}-${formattedMonth}-${formattedDay}`;
+    const cacheKey = `master-${dateStr}-${timeframe}`;
+    const isToday = new Date(selectedDate).toDateString() === new Date().toDateString();
+
+    if (!isToday && cache.current[cacheKey]) {
+      setData(cache.current[cacheKey]);
       setViewTimeframe(timeframe);
       setViewDate(selectedDate);
-      setInitialLoading(false);
-    } else if (!hasRenderedDataRef.current) {
-      setInitialLoading(true);
-    }
-
-    if (!isCurrentPeriod && cached) {
+      setIsLoading(false);
       return;
     }
 
     const fetchMasterData = async () => {
-      if (masterAbortRef.current) masterAbortRef.current.abort();
-      const controller = new AbortController();
-      masterAbortRef.current = controller;
-      const requestId = ++masterRequestIdRef.current;
-      if (!hasRenderedDataRef.current) setInitialLoading(true);
-
       try {
-        const res = await fetch(`${API_URL}/api/analytics/master?date=${dateStr}&timeframe=${timeframe}`, { signal: controller.signal });
-        if (!res.ok) throw new Error('Analytics request failed');
+        const res = await fetch(`${API_URL}/api/analytics/master?date=${dateStr}&timeframe=${timeframe}`, { signal });
         const json = await res.json();
-        if (controller.signal.aborted || requestId !== masterRequestIdRef.current) return;
-        masterCache.set(cacheKey, json);
-        setData(json);
-        setLoadedCacheKey(cacheKey);
-        hasRenderedDataRef.current = true;
-        renderedViewRef.current = { date: selectedDate, timeframe };
-        setViewTimeframe(timeframe);
-        setViewDate(selectedDate);
-        setAnalyticsError("");
-      } catch {
-        if (!controller.signal.aborted && requestId === masterRequestIdRef.current) {
-          setAnalyticsError(hasRenderedDataRef.current ? "Update failed — showing last successful data" : "Unable to load analytics");
-          if (isUncachedNavigation) {
-            preserveAnalyticsErrorRef.current = true;
-            setSelectedDate(renderedViewRef.current.date);
-            setTimeframe(renderedViewRef.current.timeframe);
-          }
+        if (!signal.aborted) {
+          cache.current[cacheKey] = json;
+          setData(json);
+          setViewTimeframe(timeframe);
+          setViewDate(selectedDate); 
+          setIsLoading(false);
         }
-      } finally {
-        if (!controller.signal.aborted && requestId === masterRequestIdRef.current) {
-          setInitialLoading(false);
-        }
+      } catch (error) {
+         if (!signal.aborted) setIsLoading(false);
       }
     };
 
-    fetchMasterData();
-    const pollTimer = isCurrentPeriod ? setInterval(fetchMasterData, 60000) : null;
+    const delay = isInitialLoad.current ? 0 : 300;
+    const debounceTimer = setTimeout(() => {
+      isInitialLoad.current = false;
+      fetchMasterData();
+    }, delay);
+    let pollTimer;
+    if (isToday) pollTimer = setInterval(() => fetchMasterData(), 60000); 
+
     return () => {
       if (pollTimer) clearInterval(pollTimer);
       if (masterAbortRef.current) masterAbortRef.current.abort();
     };
-  }, [API_URL, selectedDate, timeframe]);
+  }, [selectedDate, timeframe, currentYear, currentMonth]);
 
-  useEffect(() => {
-    let timer;
-    if (initialLoading) {
-      timer = setTimeout(() => {
-        initialLoaderShownAtRef.current = Date.now();
-        setShowInitialLoading(true);
-      }, 200);
-    } else if (showInitialLoading) {
-      const remaining = Math.max(0, 250 - (Date.now() - initialLoaderShownAtRef.current));
-      timer = setTimeout(() => setShowInitialLoading(false), remaining);
-    }
-    return () => clearTimeout(timer);
-  }, [initialLoading, showInitialLoading]);
-
-  const activeData = data;
-  const currentMonthlyCacheKey = `monthStats-${currentYear}-${currentMonth}`;
-  const activeMonthlyStats = loadedMonthlyCacheKey === currentMonthlyCacheKey ? monthlyStats : EMPTY_MONTHLY_STATS;
-  const activeViewDate = viewDate;
-  const activeViewTimeframe = viewTimeframe;
-  const chartTrendData = useMemo(() => activeData.trend || [], [activeData.trend]);
+  const chartTrendData = useMemo(() => data?.trend || [], [data?.trend]);
 
   const { genHours, offHours } = useMemo(() => {
     return {
       genHours: activeData.distribution?.find(d => d.name === 'Gen')?.value || 0,
       offHours: activeData.distribution?.find(d => d.name === 'Off')?.value || 0
     };
-  }, [activeData.distribution]);
-  const hasAnalyticsData = loadedCacheKey !== null;
-  const navigationPending = selectedCacheKey !== loadedCacheKey;
+  }, [data.distribution]);
 
   const heatmapDays = useMemo(() => {
     const viewYear = activeViewDate.getFullYear();
@@ -336,10 +276,7 @@ export default function Analytics({ darkMode }) {
     });
   }, [activeViewDate, chartTrendData]);
   
-  const inputDateString = `${viewDate.getFullYear()}-${String(viewDate.getMonth()+1).padStart(2,'0')}-${String(viewDate.getDate()).padStart(2,'0')}`;
-  const nowForInput = new Date();
-  const maxDateString = `${nowForInput.getFullYear()}-${String(nowForInput.getMonth()+1).padStart(2,'0')}-${String(nowForInput.getDate()).padStart(2,'0')}`;
-  const forwardDisabled = navigationPending || periodContainsNow(viewDate, viewTimeframe) || viewDate > nowForInput;
+  const inputDateString = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth()+1).padStart(2,'0')}-${String(selectedDate.getDate()).padStart(2,'0')}`;
 
   const renderDayTrace = () => {
   const localMidnight = new Date(activeViewDate).setHours(0, 0, 0, 0);
@@ -575,9 +512,9 @@ export default function Analytics({ darkMode }) {
             </div>
             
             <div className="flex items-center justify-between px-1">
-              <button aria-label="Previous period" disabled={navigationPending} onClick={() => adjustDate(-1)} className="p-1.5 text-emerald-500 hover:bg-emerald-500/10 transition-colors active:opacity-50 disabled:opacity-40 disabled:cursor-wait"><ChevronLeft size={18} strokeWidth={3} /></button>
+              <button onClick={() => adjustDate(-1)} className="p-1.5 text-emerald-500 hover:bg-emerald-500/10 transition-colors active:opacity-50"><ChevronLeft size={18} strokeWidth={3} /></button>
               <label className="relative cursor-pointer flex-1 text-center group mx-2 py-1">
-                <input type="date" disabled={navigationPending} max={maxDateString} value={inputDateString} onChange={(e) => { if(e.target.value) { const [y, m, d] = e.target.value.split('-'); e.target.blur(); setTimeout(() => setSelectedDate(new Date(y, m - 1, d)), 10); }}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-wait" />
+                <input type="date" value={inputDateString} onChange={(e) => { if(e.target.value) { const [y, m, d] = e.target.value.split('-'); e.target.blur(); setTimeout(() => setSelectedDate(new Date(y, m - 1, d)), 10); }}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
                 <span className="font-black text-slate-800 dark:text-white text-xs lg:text-sm tracking-tighter group-hover:text-emerald-500 transition-colors select-none">{getFormattedDateRange()}</span>
               </label>
               <button aria-label="Next period" onClick={() => adjustDate(1)} disabled={forwardDisabled} className={`p-1.5 transition-colors ${forwardDisabled ? 'text-slate-300 dark:text-slate-700 cursor-not-allowed' : 'text-emerald-500 hover:bg-emerald-500/10 active:opacity-50'}`}><ChevronRight size={18} strokeWidth={3} /></button>
@@ -632,10 +569,9 @@ export default function Analytics({ darkMode }) {
 
           <div className="order-2 lg:order-none w-full bg-white dark:bg-[#020617] p-6 lg:p-8 flex flex-col flex-1">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-4">
-              <div>
-                <h3 className="text-lg font-black uppercase tracking-widest text-slate-900 dark:text-white leading-none">{getChartTitle()}</h3>
-                {analyticsError && <p role="alert" className="text-[9px] font-bold text-red-500 mt-1">{analyticsError}</p>}
-              </div>
+              <h3 className="text-lg font-black uppercase tracking-widest text-slate-900 dark:text-white leading-none">
+                {getChartTitle()}
+              </h3>
               <div className="flex items-center gap-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 self-start sm:self-auto">
                 <div className="flex items-center gap-1.5"><div className="w-2 h-2 bg-[#10b981]" /><span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Grid</span></div>
                 <div className="flex items-center gap-1.5"><div className="w-2 h-2 bg-[#f59e0b]" /><span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Gen</span></div>
@@ -643,11 +579,9 @@ export default function Analytics({ darkMode }) {
               </div>
             </div>
             
-            <div className={`w-full relative ${activeViewTimeframe === 'year' ? 'flex flex-col flex-1 min-h-[320px] pb-2' : activeViewTimeframe === 'month' ? 'h-[320px]' : 'h-[280px]'}`}>
-              {showInitialLoading && (
-                <div role="status" aria-live="polite" className="absolute inset-0 z-50 flex items-center justify-center bg-white dark:bg-[#020617] text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
-                  Loading analytics...
-                </div>
+            <div className={`w-full relative ${viewTimeframe === 'year' ? 'flex flex-col flex-1 min-h-[320px] pb-2' : viewTimeframe === 'month' ? 'h-[320px]' : 'h-[280px]'}`}>
+              {isLoading && (
+                <div className="absolute inset-0 z-50 bg-white/50 dark:bg-[#020617]/50 backdrop-blur-[2px]"></div>
               )}
               {activeViewTimeframe === 'day' && renderDayTrace()}
               {activeViewTimeframe === 'week' && renderWeekBarChart()}
