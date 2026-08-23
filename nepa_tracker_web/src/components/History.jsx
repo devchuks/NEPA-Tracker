@@ -26,7 +26,6 @@ export default function History({ darkMode }) {
   const [initialLoading, setInitialLoading] = useState(!initialCachedPage);
   const [showInitialLoading, setShowInitialLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
-  const [showPageLoading, setShowPageLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
   const historyAbortRef = useRef(null);
@@ -116,15 +115,6 @@ export default function History({ darkMode }) {
     }
     return () => clearTimeout(timer);
   }, [initialLoading, showInitialLoading]);
-
-  useEffect(() => {
-    if (!pageLoading || initialLoading) {
-      setShowPageLoading(false);
-      return;
-    }
-    const timer = setTimeout(() => setShowPageLoading(true), 450);
-    return () => clearTimeout(timer);
-  }, [pageLoading, initialLoading]);
 
   useEffect(() => {
     if (!mutationPending) {
@@ -367,7 +357,6 @@ export default function History({ darkMode }) {
         <div>
           <h2 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white uppercase">Archive Vault</h2>
           <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Full Power Event Records</p>
-          {showPageLoading && <p role="status" aria-live="polite" className="text-[9px] font-bold uppercase tracking-widest text-blue-500 mt-1">Loading page {page}...</p>}
           {loadError && <p role="alert" className="text-[9px] font-bold text-red-500 mt-1">{loadError}</p>}
         </div>
         <div className="flex gap-2 w-full sm:w-auto">

@@ -17,10 +17,8 @@ function DelayedRouteFallback() {
   }, []);
 
   return visible ? (
-    <div role="status" aria-live="polite" className="min-h-[320px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#020617] p-8">
-      <span className="sr-only">Loading page</span>
-      <div className="h-5 w-40 bg-slate-200 dark:bg-slate-800 animate-pulse mb-8" />
-      <div className="h-56 bg-slate-100 dark:bg-slate-900 animate-pulse" />
+    <div role="status" aria-live="polite" className="min-h-[320px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+      Loading page...
     </div>
   ) : <div className="min-h-[320px]" aria-hidden="true" />;
 }
@@ -59,13 +57,7 @@ function App() {
   const [statusError, setStatusError] = useState("");
   const [logsError, setLogsError] = useState("");
   const [lastSynced, setLastSynced] = useState(null);
-  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
-  const [showDashboardLoader, setShowDashboardLoader] = useState(false);
-  const [showDashboardUpdating, setShowDashboardUpdating] = useState(false);
-  const statusVerifiedRef = useRef(false);
   const dashboardAbortRef = useRef(null);
-  const dashboardLoaderShownAtRef = useRef(0);
-  const dashboardUpdatingShownAtRef = useRef(0);
   
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
@@ -94,36 +86,6 @@ function App() {
   }, [location.pathname]);
 
   useEffect(() => {
-    let timer;
-    if (status !== null || statusError) {
-      if (showDashboardLoader) {
-        const remaining = Math.max(0, 250 - (Date.now() - dashboardLoaderShownAtRef.current));
-        timer = setTimeout(() => setShowDashboardLoader(false), remaining);
-      }
-    } else {
-      timer = setTimeout(() => {
-        dashboardLoaderShownAtRef.current = Date.now();
-        setShowDashboardLoader(true);
-      }, 200);
-    }
-    return () => clearTimeout(timer);
-  }, [status, statusError, showDashboardLoader]);
-
-  useEffect(() => {
-    let timer;
-    if (dashboardRefreshing) {
-      timer = setTimeout(() => {
-        dashboardUpdatingShownAtRef.current = Date.now();
-        setShowDashboardUpdating(true);
-      }, 500);
-    } else if (showDashboardUpdating) {
-      const remaining = Math.max(0, 250 - (Date.now() - dashboardUpdatingShownAtRef.current));
-      timer = setTimeout(() => setShowDashboardUpdating(false), remaining);
-    }
-    return () => clearTimeout(timer);
-  }, [dashboardRefreshing, showDashboardUpdating]);
-
-  useEffect(() => {
     if (!sourcePending) {
       setShowSourcePending(false);
       return;
@@ -136,7 +98,6 @@ function App() {
     if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
     const controller = new AbortController();
     dashboardAbortRef.current = controller;
-    if (statusVerifiedRef.current) setDashboardRefreshing(true);
 
     const statusRequest = async () => {
       try {
@@ -149,7 +110,6 @@ function App() {
         setEventsToday(data.events_today ?? 0);
         setStatusError("");
         setLastSynced(new Date());
-        statusVerifiedRef.current = true;
       } catch {
         if (!controller.signal.aborted) setStatusError("Live status unavailable");
       }
@@ -169,7 +129,6 @@ function App() {
     };
 
     await Promise.allSettled([statusRequest(), logsRequest()]);
-    if (!controller.signal.aborted) setDashboardRefreshing(false);
   }
 
   const fetchTodayAnalytics = async () => {
@@ -302,9 +261,6 @@ function App() {
             </div>
             
             <div className="flex items-center gap-2 lg:gap-3">
-              {showDashboardUpdating && (
-                <span role="status" aria-live="polite" className="text-[9px] font-bold uppercase tracking-widest text-blue-500">Updating...</span>
-              )}
               <button aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
                 {darkMode ? <Sun size={14} /> : <Moon size={14} />}
               </button>
@@ -321,20 +277,6 @@ function App() {
           <Routes>
             <Route path="/" element={
               <div className="relative grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] border-y lg:border border-slate-200 dark:border-slate-800 lg:rounded-xl overflow-hidden shadow-xl dark:shadow-2xl">
-                {showDashboardLoader && (
-                  <div role="status" aria-live="polite" className="absolute inset-0 z-40 grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] p-6 gap-6">
-                    <span className="sr-only">Loading live dashboard</span>
-                    <div className="lg:col-span-4 space-y-4">
-                      <div className="h-56 bg-slate-100 dark:bg-slate-900 animate-pulse" />
-                      <div className="h-20 bg-slate-100 dark:bg-slate-900 animate-pulse" />
-                    </div>
-                    <div className="lg:col-span-8 space-y-4">
-                      <div className="h-8 w-48 bg-slate-200 dark:bg-slate-800 animate-pulse" />
-                      <div className="h-72 bg-slate-100 dark:bg-slate-900 animate-pulse" />
-                    </div>
-                  </div>
-                )}
-                
                 {/* LEFT COLUMN */}
                 <div className="lg:col-span-4 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800">
                   

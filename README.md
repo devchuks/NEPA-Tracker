@@ -3,7 +3,7 @@
 A full-stack IoT monitoring system built to track power availability and source transitions in real-time. Designed specifically for the Nigerian energy landscape to provide transparent, historical data on Grid (NEPA) versus Generator uptime.
 
 <p align="center">
-  <img src="./sc1.png" alt="NEPA Tracker Live Dashboard" width="100%">
+  <img src="./nepa_tracker_web/public/sc1.png" alt="NEPA Tracker Live Dashboard" width="100%">
 </p>
 
 ## 🏗️ Architecture & Tech Stack
@@ -39,7 +39,7 @@ Rather than relying on a microcontroller to send a "Power Off" signal — which 
 Visualizes grid availability, generator usage, downtime, outage events, and reliability metrics for an individual day.
 
 <p align="center">
-  <img src="./sc4.png" alt="NEPA Tracker Daily Power Analytics" width="100%">
+  <img src="./nepa_tracker_web/public/sc4.png" alt="NEPA Tracker Daily Power Analytics" width="100%">
 </p>
 
 ### Monthly Uptime Heatmap
@@ -47,7 +47,7 @@ Visualizes grid availability, generator usage, downtime, outage events, and reli
 Provides a calendar-style overview of daily grid availability throughout the selected month.
 
 <p align="center">
-  <img src="./sc3.png" alt="NEPA Tracker Monthly Uptime Heatmap" width="100%">
+  <img src="./nepa_tracker_web/public/sc3.png" alt="NEPA Tracker Monthly Uptime Heatmap" width="100%">
 </p>
 
 ### Yearly Reliability Overview
@@ -55,5 +55,5 @@ Provides a calendar-style overview of daily grid availability throughout the sel
 Aggregates power reliability across the year, including quarterly and monthly availability statistics.
 
 <p align="center">
-  <img src="./sc2.png" alt="NEPA Tracker Yearly Reliability Overview" width="100%">
+  <img src="./nepa_tracker_web/public/sc2.png" alt="NEPA Tracker Yearly Reliability Overview" width="100%">
 </p>
