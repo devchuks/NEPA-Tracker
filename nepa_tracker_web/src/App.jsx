@@ -8,6 +8,21 @@ const History = lazy(() => import('./components/History'));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+function DelayedRouteFallback() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), 200);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return visible ? (
+    <div role="status" aria-live="polite" className="min-h-[320px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+      Loading page...
+    </div>
+  ) : <div className="min-h-[320px]" aria-hidden="true" />;
+}
+
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
   const day = date.getDate();
@@ -35,17 +50,14 @@ const getRelativeDay = (timestamp) => {
 function App() {
   const API_URL = import.meta.env.VITE_API_URL || 'http://192.168.1.140:8000';
 
-  const [status, setStatus] = useState(() => localStorage.getItem('nepa-status') || 'SYNCING...')
-  const [powerSource, setPowerSource] = useState(() => localStorage.getItem('nepa-source') || 'NEPA')
-  const [logs, setLogs] = useState(() => {
-    const savedLogs = localStorage.getItem('nepa-logs')
-    try {
-      return savedLogs ? JSON.parse(savedLogs) : []
-    } catch (e) {
-      localStorage.removeItem('nepa-logs')
-      return []
-    }
-  })
+  const [status, setStatus] = useState(null);
+  const [powerSource, setPowerSource] = useState(null);
+  const [eventsToday, setEventsToday] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [statusError, setStatusError] = useState("");
+  const [logsError, setLogsError] = useState("");
+  const [lastSynced, setLastSynced] = useState(null);
+  const dashboardAbortRef = useRef(null);
   
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
@@ -73,26 +85,50 @@ function App() {
     window.scrollTo(0, 0);
   }, [location.pathname]);
 
-  const fetchData = async () => {
-    try {
-      const [statusRes, logsRes] = await Promise.all([
-        fetch(`${API_URL}/api/status`),
-        fetch(`${API_URL}/api/logs`)
-      ]);
-
-      const statusData = await statusRes.json()
-      const logsData = await logsRes.json()
-
-      setStatus(statusData.nepa)
-      setPowerSource(statusData.source)
-      localStorage.setItem('nepa-status', statusData.nepa)
-      localStorage.setItem('nepa-source', statusData.source)
-
-      setLogs(logsData)
-      localStorage.setItem('nepa-logs', JSON.stringify(logsData))
-    } catch (error) {
-      setStatus('SERVER DOWN')
+  useEffect(() => {
+    if (!sourcePending) {
+      setShowSourcePending(false);
+      return;
     }
+    const timer = setTimeout(() => setShowSourcePending(true), 450);
+    return () => clearTimeout(timer);
+  }, [sourcePending]);
+
+  const fetchData = async () => {
+    if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
+    const controller = new AbortController();
+    dashboardAbortRef.current = controller;
+
+    const statusRequest = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/status`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Status request failed');
+        const data = await response.json();
+        if (controller.signal.aborted) return;
+        setStatus(data.nepa);
+        setPowerSource(data.source);
+        setEventsToday(data.events_today ?? 0);
+        setStatusError("");
+        setLastSynced(new Date());
+      } catch {
+        if (!controller.signal.aborted) setStatusError("Live status unavailable");
+      }
+    };
+
+    const logsRequest = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/logs`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Recent activity request failed');
+        const data = await response.json();
+        if (controller.signal.aborted) return;
+        setLogs(data);
+        setLogsError("");
+      } catch {
+        if (!controller.signal.aborted) setLogsError("Recent activity unavailable");
+      }
+    };
+
+    await Promise.allSettled([statusRequest(), logsRequest()]);
   }
 
   const fetchTodayAnalytics = async () => {
@@ -225,7 +261,7 @@ function App() {
             </div>
             
             <div className="flex items-center gap-2 lg:gap-3">
-              <button onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
+              <button aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
                 {darkMode ? <Sun size={14} /> : <Moon size={14} />}
               </button>
               
@@ -240,8 +276,7 @@ function App() {
         <main className="max-w-[1600px] mx-auto p-4 lg:p-8">
           <Routes>
             <Route path="/" element={
-              <div className="grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] border-y lg:border border-slate-200 dark:border-slate-800 lg:rounded-xl overflow-hidden shadow-xl dark:shadow-2xl">
-                
+              <div className="relative grid grid-cols-1 lg:grid-cols-12 bg-white dark:bg-[#020617] border-y lg:border border-slate-200 dark:border-slate-800 lg:rounded-xl overflow-hidden shadow-xl dark:shadow-2xl">
                 {/* LEFT COLUMN */}
                 <div className="lg:col-span-4 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800">
                   
