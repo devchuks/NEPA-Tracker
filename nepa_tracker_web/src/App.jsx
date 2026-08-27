@@ -61,14 +61,23 @@ function App() {
   const dashboardSpinnerTimerRef = useRef(null);
   const dashboardSpinnerVisibleRef = useRef(false);
   
-  const [darkMode, setDarkMode] = useState(() => {
+  const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
     try {
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch (e) {
-      return true;
+      const savedMode = saved !== null ? JSON.parse(saved) : null;
+      if (typeof savedMode === 'boolean') {
+        return { darkMode: savedMode, followsSystem: false };
+      }
+    } catch {
+      localStorage.removeItem('nepa-dark-mode');
     }
+
+    return {
+      darkMode: window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false,
+      followsSystem: true,
+    };
   });
+  const { darkMode, followsSystem } = theme;
 
   const [todayTrend, setTodayTrend] = useState([]);
 
@@ -82,6 +91,20 @@ function App() {
   const sourcePendingRef = useRef(false);
 
   const location = useLocation()
+
+  useEffect(() => {
+    if (!followsSystem) return undefined;
+
+    const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleColorSchemeChange = (event) => {
+      setTheme((current) => current.followsSystem
+        ? { ...current, darkMode: event.matches }
+        : current);
+    };
+
+    colorScheme.addEventListener('change', handleColorSchemeChange);
+    return () => colorScheme.removeEventListener('change', handleColorSchemeChange);
+  }, [followsSystem]);
 
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -257,7 +280,7 @@ function App() {
 
   const toggleDarkMode = () => {
     const nextMode = !darkMode;
-    setDarkMode(nextMode);
+    setTheme({ darkMode: nextMode, followsSystem: false });
     localStorage.setItem('nepa-dark-mode', JSON.stringify(nextMode));
   };
 
@@ -286,10 +309,6 @@ function App() {
               <span className="w-4 h-4 flex items-center justify-center shrink-0" aria-hidden={!(showDashboardSpinner && location.pathname === '/')}>
                 {showDashboardSpinner && location.pathname === '/' && <LoaderCircle aria-label="Refreshing live data" className="animate-spin text-blue-500" size={14} />}
               </span>
-              <button aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'} onClick={toggleDarkMode} className="p-2 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:opacity-80 transition-opacity">
-                {darkMode ? <Sun size={14} /> : <Moon size={14} />}
-              </button>
-              
               <div className="flex gap-1 bg-slate-100 dark:bg-slate-900 p-1 border border-slate-200 dark:border-slate-800">
                 <Link to="/" className={`px-3 lg:px-5 py-1.5 lg:py-2 text-[10px] lg:text-xs font-bold ${location.pathname === '/' ? 'bg-white dark:bg-slate-800 text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Dashboard</Link>
                 <Link to="/calendar" className={`px-3 lg:px-5 py-1.5 lg:py-2 text-[10px] lg:text-xs font-bold ${location.pathname === '/calendar' ? 'bg-white dark:bg-slate-800 text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Analytics</Link>
@@ -504,6 +523,16 @@ function App() {
           pending={sourcePending}
           showPending={showSourcePending}
         />
+
+        <button
+          type="button"
+          aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          onClick={toggleDarkMode}
+          className="fixed bottom-4 left-4 z-[60] flex h-9 w-9 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-slate-600 shadow-lg backdrop-blur-sm transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-300 dark:hover:bg-slate-800 dark:focus-visible:ring-offset-slate-950"
+        >
+          {darkMode ? <Sun size={15} aria-hidden="true" /> : <Moon size={15} aria-hidden="true" />}
+        </button>
 
       </div>
     </div>
