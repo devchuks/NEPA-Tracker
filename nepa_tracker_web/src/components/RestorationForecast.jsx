@@ -15,15 +15,16 @@ const fullDay = value => new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Africa/Lagos', weekday: 'long', day: 'numeric', month: 'long',
 }).format(new Date(value));
 
+function describeDay(value, reference) {
+  const offset = (calendarDay(value) - calendarDay(reference)) / 86400000;
+  return offset === 0 ? 'today' : offset === 1 ? 'tomorrow' : `on ${fullDay(value)}`;
+}
+
 function returnWindow(window, reference) {
-  const describeDay = value => {
-    const offset = (calendarDay(value) - calendarDay(reference)) / 86400000;
-    return offset === 0 ? 'today' : offset === 1 ? 'tomorrow' : `on ${fullDay(value)}`;
-  };
   if (calendarDay(window.start) === calendarDay(window.end)) {
-    return `${describeDay(window.start)} between ${clock(window.start)} and ${clock(window.end)}`;
+    return `${describeDay(window.start, reference)} between ${clock(window.start)} and ${clock(window.end)}`;
   }
-  return `between ${clock(window.start)} ${describeDay(window.start)} and ${clock(window.end)} ${describeDay(window.end)}`;
+  return `between ${clock(window.start)} ${describeDay(window.start, reference)} and ${clock(window.end)} ${describeDay(window.end, reference)}`;
 }
 
 function Elapsed({ seconds: elapsed, receivedAt }) {
@@ -97,9 +98,21 @@ function RestorationForecast({ status, apiUrl }) {
       {Number.isFinite(forecast?.elapsed_seconds) && <span className="text-[9px] font-bold text-slate-500 tabular-nums whitespace-nowrap"><Elapsed seconds={forecast.elapsed_seconds} receivedAt={forecast.receivedAt} /></span>}
     </div>
     {active ? <>
-      <div className="px-4 lg:px-5 pb-4">
-        <p className="text-sm font-bold leading-relaxed text-slate-900 dark:text-white">Power may return {returnWindow(forecast.window, forecast.generated_at)}.</p>
-        <p className="mt-2 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">{forecast.confidence === 'moderate' ? 'Based on previous outages. The time may change.' : 'Rough estimate from limited history. The time may change.'} All times are WAT.</p>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] divide-x divide-slate-200 dark:divide-slate-800 border-y border-slate-200 dark:border-slate-800">
+        <div className="p-4 lg:p-5">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Most likely return</p>
+          <p className="mt-1 text-xl font-black tracking-tight text-slate-900 dark:text-white">{clock(forecast.predicted_restoration)}</p>
+          <p className="mt-1 text-[9px] font-bold text-slate-500 capitalize">{describeDay(forecast.predicted_restoration, forecast.generated_at)} · WAT</p>
+        </div>
+        <div className="p-4 lg:p-5">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Confidence</p>
+          <p className={`mt-1 text-xl font-black ${forecast.confidence === 'moderate' ? 'text-blue-600 dark:text-blue-400' : 'text-amber-600 dark:text-amber-500'}`}>{forecast.confidence === 'moderate' ? 'Moderate' : 'Low'}</p>
+          <p className="mt-1 text-[9px] font-bold text-slate-500">{forecast.sample_size} similar outages</p>
+        </div>
+      </div>
+      <div className="p-4 lg:p-5">
+        <p className="text-[11px] font-bold leading-relaxed text-slate-600 dark:text-slate-300">Power may return {returnWindow(forecast.window, forecast.generated_at)}.</p>
+        <p className="mt-2 text-[9px] text-slate-400 dark:text-slate-500">Based on past outages. Actual return may be earlier or later.</p>
       </div>
     </> : <p role="status" className="px-4 lg:px-5 pb-4 text-[10px] font-bold text-slate-500 dark:text-slate-400">{message}</p>}
   </section>;
