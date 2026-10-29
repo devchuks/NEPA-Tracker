@@ -1,17 +1,41 @@
 import { memo, useEffect, useState } from 'react';
+import { Clock } from 'lucide-react';
 
-const wat = value => new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'Africa/Lagos', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+const clock = value => new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Lagos', hour: 'numeric', minute: '2-digit', hour12: true,
+}).format(new Date(value)).toUpperCase();
+const calendarDay = value => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Lagos', year: 'numeric', month: 'numeric', day: 'numeric',
+  }).formatToParts(new Date(value));
+  const part = type => Number(parts.find(p => p.type === type).value);
+  return Date.UTC(part('year'), part('month') - 1, part('day'));
+};
+const fullDay = value => new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Lagos', weekday: 'long', day: 'numeric', month: 'long',
 }).format(new Date(value));
 
-function Elapsed({ start }) {
-  const [now, setNow] = useState(Date.now);
+function returnWindow(window, reference) {
+  const describeDay = value => {
+    const offset = (calendarDay(value) - calendarDay(reference)) / 86400000;
+    return offset === 0 ? 'today' : offset === 1 ? 'tomorrow' : `on ${fullDay(value)}`;
+  };
+  if (calendarDay(window.start) === calendarDay(window.end)) {
+    return `${describeDay(window.start)} between ${clock(window.start)} and ${clock(window.end)}`;
+  }
+  return `between ${clock(window.start)} ${describeDay(window.start)} and ${clock(window.end)} ${describeDay(window.end)}`;
+}
+
+function Elapsed({ seconds: elapsed, receivedAt }) {
+  const [now, setNow] = useState(receivedAt);
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => setNow(performance.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  const seconds = Math.max(0, Math.floor((now - Date.parse(start)) / 1000));
-  return <span>{Math.floor(seconds / 3600)}h {Math.floor(seconds % 3600 / 60)}m elapsed</span>;
+  const seconds = Math.max(0, Math.floor(elapsed + Math.max(0, now - receivedAt) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  return <span>Off for {hours ? `${hours}h ${minutes}m` : `${minutes} min`}</span>;
 }
 
 function RestorationForecast({ status, apiUrl }) {
@@ -26,6 +50,7 @@ function RestorationForecast({ status, apiUrl }) {
     let expiration;
     let controller;
     const refresh = async () => {
+      const requestStarted = performance.now();
       controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
       try {
@@ -33,7 +58,8 @@ function RestorationForecast({ status, apiUrl }) {
         if (!response.ok) throw new Error('Prediction unavailable');
         const data = await response.json();
         if (stopped) return;
-        setForecast(data);
+        const receivedAt = performance.now();
+        setForecast({ ...data, receivedAt });
         setError(false);
         setExpired(false);
         clearTimeout(expiration);
@@ -41,7 +67,9 @@ function RestorationForecast({ status, apiUrl }) {
           const expiresAt = Math.min(Date.parse(data.valid_until),
             data.predicted_restoration ? Date.parse(data.predicted_restoration) : Infinity,
             data.window ? Date.parse(data.window.end) : Infinity);
-          expiration = setTimeout(() => setExpired(true), Math.max(0, expiresAt - Date.now()));
+          // Compare server timestamps with one another; browser clocks can differ.
+          expiration = setTimeout(() => setExpired(true), Math.max(0,
+            expiresAt - Date.parse(data.generated_at) - (receivedAt - requestStarted)));
         }
       } catch {
         if (!stopped) { setError(true); setForecast(null); }
@@ -56,36 +84,24 @@ function RestorationForecast({ status, apiUrl }) {
 
   if (status !== 'OFF') return null;
   const active = !error && !expired && forecast?.status === 'active';
-  const windowExpired = active && Date.parse(forecast.window.end) <= Date.now();
-  let message = 'Checking historical outage patterns…';
+  let message = 'Checking when grid power may return…';
   if (error) message = 'Forecast unavailable. Retrying automatically.';
-  else if (expired || windowExpired) message = 'Estimate expired. Waiting for a fresh forecast.';
-  else if (forecast?.status === 'pending') message = 'Waiting for a sustained outage. Brief interruptions are excluded.';
-  else if (forecast?.status === 'insufficient_data') message = `Not enough comparable outages yet (${forecast.sample_size} available).`;
-  else if (forecast && !active) message = 'No reliable forecast available for the current outage.';
+  else if (expired) message = 'Updating the estimated return time…';
+  else if (forecast?.status === 'pending') message = 'Waiting to see if this is a brief interruption.';
+  else if (forecast?.status === 'insufficient_data') message = 'Not enough past outages to estimate a return time yet.';
+  else if (forecast && !active) message = 'Unable to estimate a return time from the available records.';
 
-  return <section aria-label="Power restoration forecast" className="border-b border-slate-200 dark:border-slate-800 p-4 lg:p-5">
-    <div className="flex justify-between gap-3 items-center">
-      <h3 className="text-[9px] font-black tracking-[0.18em] uppercase text-slate-500 dark:text-slate-400">Grid restoration forecast</h3>
-      {forecast?.outage_start && <span className="text-[9px] text-slate-400"><Elapsed start={forecast.outage_start} /></span>}
+  return <section aria-label="Power restoration forecast" className="border-b border-slate-200 dark:border-slate-800">
+    <div className="p-4 lg:p-5 flex justify-between gap-3 items-center">
+      <h3 className="flex items-center gap-2 text-[9px] font-black tracking-widest uppercase text-slate-400 dark:text-slate-500"><Clock size={13} className="text-blue-500 shrink-0" />Grid return estimate</h3>
+      {Number.isFinite(forecast?.elapsed_seconds) && <span className="text-[9px] font-bold text-slate-500 tabular-nums whitespace-nowrap"><Elapsed seconds={forecast.elapsed_seconds} receivedAt={forecast.receivedAt} /></span>}
     </div>
-    {active && !windowExpired ? <>
-      <p className="mt-3 text-sm font-bold text-slate-900 dark:text-slate-100">{wat(forecast.window.start)} – {wat(forecast.window.end)} <span className="text-[9px] text-slate-400">WAT</span></p>
-      <p className="mt-1 text-[9px] text-slate-500">Median return {wat(forecast.predicted_restoration)} · central 80% historical window</p>
-      <div className="grid grid-cols-3 gap-2 mt-4">
-        {[1, 2, 4].map(hours => {
-          const probability = forecast.probabilities[String(hours)];
-          const bounds = probability.interval_95.map(p => `${Math.round(p * 100)}%`).join('–');
-          return <div key={hours} title={`95% uncertainty range: ${bounds}`}>
-            <p className="text-[9px] uppercase text-slate-400">Within {hours}h</p>
-            <p className="text-lg font-black text-blue-600 dark:text-blue-400">{Math.round(probability.value * 100)}%</p>
-            <p className="text-[8px] text-slate-500">{bounds}</p>
-          </div>;
-        })}
+    {active ? <>
+      <div className="px-4 lg:px-5 pb-4">
+        <p className="text-sm font-bold leading-relaxed text-slate-900 dark:text-white">Power may return {returnWindow(forecast.window, forecast.generated_at)}.</p>
+        <p className="mt-2 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">{forecast.confidence === 'moderate' ? 'Based on previous outages. The time may change.' : 'Rough estimate from limited history. The time may change.'} All times are WAT.</p>
       </div>
-      <p className="mt-3 text-[9px] text-slate-500">{forecast.confidence === 'moderate' ? 'Moderate' : 'Low'} confidence · {forecast.sample_size} comparable outages</p>
-      <p className="mt-1 text-[9px] text-slate-400">Historical estimate, not a guarantee. Generator supply is not grid restoration.</p>
-    </> : <p role="status" className="mt-3 text-[10px] text-slate-500 dark:text-slate-400">{message}</p>}
+    </> : <p role="status" className="px-4 lg:px-5 pb-4 text-[10px] font-bold text-slate-500 dark:text-slate-400">{message}</p>}
   </section>;
 }
 
