@@ -6,6 +6,8 @@ from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy import create_engine, Column, Integer, DateTime, String, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy import event as sqlalchemy_event, text
+from prediction_service import cache as prediction_cache, estimate, instant
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -39,6 +41,29 @@ class PowerLog(Base):
     timestamp = Column(DateTime, default=datetime.now)
 
 Base.metadata.create_all(bind=engine)
+
+
+@sqlalchemy_event.listens_for(Session, "before_flush")
+def prediction_history_changed(session, flush_context, instances):
+    if any(isinstance(row, PowerLog) for row in session.new | session.dirty | session.deleted):
+        session.info['prediction_history_changed'] = True
+
+
+@sqlalchemy_event.listens_for(Session, "do_orm_execute")
+def prediction_bulk_changed(execution):
+    if (execution.is_delete or execution.is_update) and execution.bind_mapper is not None and execution.bind_mapper.class_ is PowerLog:
+        execution.session.info['prediction_history_changed'] = True
+
+
+@sqlalchemy_event.listens_for(Session, "after_commit")
+def prediction_history_committed(session):
+    if session.info.pop('prediction_history_changed', False):
+        prediction_cache.invalidate()
+
+
+@sqlalchemy_event.listens_for(Session, "after_rollback")
+def prediction_history_rolled_back(session):
+    session.info.pop('prediction_history_changed', None)
 
 def get_db():
     db = SessionLocal()
@@ -263,6 +288,41 @@ def get_status(db: Session = Depends(get_db)):
     }
 
 # --- ANALYTICS ENDPOINTS ---
+@app.get("/api/predictions/restoration")
+def get_restoration_prediction(db: Session = Depends(get_db)):
+    # A sync endpoint runs in FastAPI's worker pool, outside the watchdog lock.
+    try:
+        if db.get_bind().dialect.name == 'postgresql':
+            db.execute(text("SET LOCAL statement_timeout = '3000ms'"))
+        status = db.query(PowerStatus).filter(PowerStatus.id == 1).first()
+        if status and status.is_online:
+            return {"status": "inactive", "reason": "electricity_on"}
+        if not status:
+            return {"status": "unavailable", "reason": "monitoring_state_missing"}
+        now = datetime.now()
+        latest = db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
+        if latest is None or latest.event != 'OFF':
+            return {"status": "unavailable", "reason": "outage_start_unverified"}
+        signature = (latest.id, latest.timestamp, latest.event, latest.source)
+        def load_history():
+            # Project only forecasting fields and bound comparisons to two years.
+            cutoff = now - timedelta(days=730)
+            columns = (PowerLog.timestamp, PowerLog.event, PowerLog.source)
+            anchor = db.query(*columns).filter(PowerLog.timestamp < cutoff).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).first()
+            rows = db.query(*columns).filter(PowerLog.timestamp >= cutoff, PowerLog.timestamp <= now).order_by(PowerLog.timestamp, PowerLog.id).all()
+            return ([anchor] if anchor else []) + rows
+        history, start = prediction_cache.get(load_history, signature, now)
+        if start is None or instant(latest.timestamp) > instant(now):
+            return {"status": "unavailable", "reason": "ambiguous_or_incomplete_history"}
+        # Eligibility uses the actual newly detected OFF, even after a brief ON.
+        if (instant(now) - instant(latest.timestamp)).total_seconds() <= 120:
+            return estimate(history, latest.timestamp, now)
+        return estimate(history, start, now)
+    except Exception:
+        logging.getLogger(__name__).exception('Restoration forecast unavailable')
+        return {"status": "unavailable", "reason": "forecast_temporarily_unavailable"}
+
+
 @app.get("/api/logs")
 def get_logs(db: Session = Depends(get_db)):
     return db.query(PowerLog).order_by(PowerLog.timestamp.desc(), PowerLog.id.desc()).limit(8).all()

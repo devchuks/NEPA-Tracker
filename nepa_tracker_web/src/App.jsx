@@ -4,6 +4,7 @@ import { Activity, Calendar as CalendarIcon, ZapOff, Zap, Clock, Info, Sun, Moon
 import AuthModal from './components/AuthModal' // <-- IMPORTED NEW COMPONENT
 import Analytics from './components/Analytics'
 import History from './components/History'
+import RestorationForecast from './components/RestorationForecast'
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -358,6 +359,8 @@ function App() {
                       {sourceError && <p role="alert" className="mt-2 text-center text-[9px] font-bold text-red-500">{sourceError}</p>}
                     </div>
                   </div>
+
+                  <RestorationForecast key={status} status={status} apiUrl={API_URL} />
 
                   {/* QUICK STATS */}
                   <div className="grid grid-cols-2 border-b border-slate-200 dark:border-slate-800">
