@@ -22,7 +22,8 @@ const formatAge = (ms) => {
 };
 
 const formatFullDate = (timestamp) => {
-  const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
+  // The API sends naive Lagos-time timestamps; parse them as local time like the rest of the timeline.
+  const date = new Date(timestamp);
   const day = date.getDate();
   const month = date.toLocaleDateString('en-US', { month: 'long' });
   const year = date.getFullYear();

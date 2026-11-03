@@ -61,7 +61,13 @@ const periodContainsNow = (date, timeframe) => {
   return now >= start && now < end;
 };
 
-const TooltipStatRow = ({ color, label, val, darkMode }) => (
+const formatTraceTime = (point) => {
+  if (point.time === 'NOW') return 'NOW';
+  if (point.time === '24:00') return '11:59 PM';
+  return new Date(point.timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+};
+
+const TooltipStatRow =({ color, label, val, darkMode }) => (
   <div className="flex items-center justify-between gap-4">
     <div className="flex items-center gap-2">
       <div className={`w-2 h-2 rounded-full ${color}`} />
@@ -284,6 +290,17 @@ export default function Analytics({ darkMode }) {
     };
   }, [API_URL, selectedDate, timeframe]);
 
+  // Label spacing on the day trace depends on how wide the bar actually is (12-hour labels are ~64px).
+  const traceLabelsRef = useRef(null);
+  const [traceWidth, setTraceWidth] = useState(0);
+  useEffect(() => {
+    const element = traceLabelsRef.current;
+    if (!element) return undefined;
+    const observer = new ResizeObserver(([entry]) => setTraceWidth(entry.contentRect.width));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [viewTimeframe]);
+
   const activeData = data;
   const currentMonthlyCacheKey = `monthStats-${currentYear}-${currentMonth}`;
   const activeMonthlyStats = loadedMonthlyCacheKey === currentMonthlyCacheKey ? monthlyStats : EMPTY_MONTHLY_STATS;
@@ -357,7 +374,7 @@ export default function Analytics({ darkMode }) {
                     {point.level === 1 ? point.status : 'OUTAGE'}
                   </span>
                   <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400 mt-1">
-                    {point.time} - {chartTrendData[i + 1].time}
+                    {formatTraceTime(point)} - {formatTraceTime(chartTrendData[i + 1])}
                   </span>
                 </div>
               </div>
@@ -366,10 +383,10 @@ export default function Analytics({ darkMode }) {
         })}
       </div>
 
-      <div className="relative w-full h-24 mt-3 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest z-10">
+      <div ref={traceLabelsRef} className="relative w-full h-24 mt-3 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest z-10">
         {(() => {
           const tiers = [-20, -20, -20];
-          const MIN_DIST = 10;
+          const MIN_DIST = traceWidth > 0 ? Math.max(10, (64 / traceWidth) * 100) : 10;
           const isToday = new Date(activeViewDate).toDateString() === new Date().toDateString();
 
           const labels = chartTrendData.map((point, i) => {
@@ -386,7 +403,7 @@ export default function Analytics({ darkMode }) {
             }
 
             const topOffset = assignedTier * 20;
-            const displayTime = (isLast && isToday) ? "NOW" : point.time;
+            const displayTime = (isLast && isToday) ? "NOW" : formatTraceTime(point);
 
             return (
               <div key={`time-${i}`} className="absolute hover:z-20 transition-all" style={{ left: `${leftPercent}%`, top: `${topOffset}px` }}>
