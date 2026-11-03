@@ -195,7 +195,14 @@ async def lifespan(app: FastAPI):
     yield
     if watchdog.task: watchdog.task.cancel()
 
-app = FastAPI(lifespan=lifespan)
+# Interactive docs list every admin endpoint; only expose them when explicitly enabled (e.g. locally).
+DOCS_ENABLED = os.getenv("ENABLE_API_DOCS") == "1"
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+)
 
 # --- SILENCE HEARTBEAT LOGS ---
 class PingFilter(logging.Filter):
@@ -477,6 +484,8 @@ def get_master_analytics(date: str, timeframe: str = "day", db: Session = Depend
 
 @app.get("/api/analytics/monthly/{year}/{month}")
 def get_monthly_averages(year: int, month: int, db: Session = Depends(get_db)):
+    if not (1 <= month <= 12) or not (1 <= year < 9999):
+        raise HTTPException(status_code=400, detail="Invalid year or month")
     start_date = datetime(year, month, 1)
     if month == 12:
         end_date = datetime(year + 1, 1, 1)
@@ -541,7 +550,7 @@ def get_all_logs(page: int = 1, limit: int = 50, db: Session = Depends(get_db)):
     total = db.query(PowerLog).count()
     return {"logs": logs, "total": total}
 
-@app.get("/api/logs/export")
+@app.get("/api/logs/export", dependencies=[Depends(verify_admin)])
 def export_logs_csv(db: Session = Depends(get_db)):
     logs_query = db.query(PowerLog).order_by(PowerLog.timestamp.asc(), PowerLog.id.asc()).yield_per(1000)
     return StreamingResponse(

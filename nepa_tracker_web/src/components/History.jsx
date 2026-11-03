@@ -44,7 +44,8 @@ export default function History({ darkMode }) {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState("");
-  const [pendingAction, setPendingAction] = useState(null); // 'save' or 'delete'
+  const [pendingAction, setPendingAction] = useState(null); // 'save', 'delete' or 'export'
+  const [exportError, setExportError] = useState("");
   const [mutationPending, setMutationPending] = useState(null);
   const [showMutationPending, setShowMutationPending] = useState(false);
   const [mutationError, setMutationError] = useState("");
@@ -133,7 +134,55 @@ export default function History({ darkMode }) {
   };
 
   const downloadCSV = () => {
-    window.location.href = `${API_URL}/api/logs/export`;
+    if (mutationPendingRef.current) return;
+    const token = localStorage.getItem("adminToken");
+    setAuthError("");
+    setExportError("");
+    if (!token) {
+      setPendingAction('export');
+      setIsAuthModalOpen(true);
+      return;
+    }
+    executeExport(token);
+  };
+
+  // The export needs the admin header, so it is fetched and saved as a blob instead of a plain link.
+  const executeExport = async (token) => {
+    if (mutationPendingRef.current) return;
+    mutationPendingRef.current = true;
+    setMutationPending('export');
+    setExportError("");
+    try {
+      const res = await fetch(`${API_URL}/api/logs/export`, {
+        headers: { 'X-Admin-Token': token }
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem("adminToken");
+        setAuthError("Invalid or expired password");
+        setPendingAction('export');
+        setIsAuthModalOpen(true);
+      } else if (res.ok) {
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'nepa_archive_export.csv';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setAuthError("");
+        setIsAuthModalOpen(false);
+        setPendingAction(null);
+      } else {
+        setExportError(await responseErrorMessage(res, "Unable to export records."));
+      }
+    } catch {
+      setExportError("Unable to export records. Check the connection and retry.");
+    } finally {
+      mutationPendingRef.current = false;
+      setMutationPending(null);
+    }
   };
 
   const toLocalIsoString = (dateInput) => {
@@ -327,6 +376,7 @@ export default function History({ darkMode }) {
   const submitPassword = (token) => {
     localStorage.setItem("adminToken", token);
     if (pendingAction === 'save') executeSave(token);
+    if (pendingAction === 'export') executeExport(token);
     if (pendingAction === 'delete') {
       if (deleteTarget === 'bulk') executeBulkDelete(token);
       else executeDelete(token);
@@ -342,6 +392,7 @@ export default function History({ darkMode }) {
           <h2 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white uppercase">Archive Vault</h2>
           <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Full Power Event Records</p>
           {loadError && <p role="alert" className="text-[9px] font-bold text-red-500 mt-1">{loadError}</p>}
+          {exportError && <p role="alert" className="text-[9px] font-bold text-red-500 mt-1">{exportError}</p>}
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
           {selectedLogs.length > 0 && (
@@ -360,9 +411,10 @@ export default function History({ darkMode }) {
           </button>
           <button 
             onClick={downloadCSV}
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-[#10b981] hover:bg-[#059669] text-white rounded-none font-black text-[10px] uppercase tracking-widest transition-all shadow-md shadow-emerald-500/20 active:opacity-50"
+            disabled={mutationPending === 'export'}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-[#10b981] hover:bg-[#059669] text-white rounded-none font-black text-[10px] uppercase tracking-widest transition-all shadow-md shadow-emerald-500/20 active:opacity-50 disabled:opacity-60 disabled:cursor-wait"
           >
-            <Download size={14} /> Export
+            <Download size={14} /> {showMutationPending && mutationPending === 'export' ? 'Exporting...' : 'Export'}
           </button>
         </div>
       </div>

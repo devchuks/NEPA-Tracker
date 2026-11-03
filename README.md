@@ -30,7 +30,7 @@ Rather than relying on a microcontroller to send a "Power Off" signal — which 
 * **Live Sync Dashboard:** Continuous telemetry monitoring displaying current power status and historical uptime with minute-level precision.
 * **Historical Timeline:** A complete archive of every power event with microsecond database precision.
 * **Analytics Engine:** Daily traces, weekly heatmaps, and continuous uptime KPI tracking.
-* **UTC-Synchronized:** Fully UTC-compliant architecture, ensuring accurate data visualization regardless of local browser offsets.
+* **Lagos Time:** Events are recorded in West Africa Time (WAT, UTC+1), matching the backend host's clock, and displayed in the viewer's local time.
 
 ## 📊 Analytics
 
