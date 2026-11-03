@@ -7,6 +7,19 @@ import History from './components/History'
 import RestorationForecast from './components/RestorationForecast'
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 25000;
+const RETRY_DELAY_MS = 5000;
+const SLOW_REFRESH_MS = 6000;
+const STALE_AFTER_MS = 3 * 60 * 1000;
+
+const formatAge = (ms) => {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${Math.max(minutes, 1)} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+};
 
 const formatFullDate = (timestamp) => {
   const date = new Date(timestamp.endsWith('Z') ? timestamp : timestamp + 'Z');
@@ -56,11 +69,18 @@ function App() {
   });
   const [statusError, setStatusError] = useState("");
   const [logsError, setLogsError] = useState("");
+  const [syncedAt, setSyncedAt] = useState(() => {
+    const value = Number(localStorage.getItem('nepa-synced-at'));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  });
   const [showDashboardSpinner, setShowDashboardSpinner] = useState(false);
+  const [dashboardSlow, setDashboardSlow] = useState(false);
   const dashboardAbortRef = useRef(null);
   const dashboardRequestIdRef = useRef(0);
   const dashboardSpinnerTimerRef = useRef(null);
   const dashboardSpinnerVisibleRef = useRef(false);
+  const dashboardSlowTimerRef = useRef(null);
+  const dashboardRetryTimerRef = useRef(null);
   
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem('nepa-dark-mode');
@@ -125,7 +145,17 @@ function App() {
     const controller = new AbortController();
     dashboardAbortRef.current = controller;
     const requestId = ++dashboardRequestIdRef.current;
+    // A request left hanging (e.g. a phone resuming a frozen tab) must not hold the spinner forever.
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+    const failed = () => timedOut || !controller.signal.aborted;
+    let anyFailed = false;
 
+    if (dashboardRetryTimerRef.current) clearTimeout(dashboardRetryTimerRef.current);
+    dashboardRetryTimerRef.current = null;
     if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
     if (!dashboardSpinnerVisibleRef.current) {
       dashboardSpinnerTimerRef.current = setTimeout(() => {
@@ -134,28 +164,37 @@ function App() {
         setShowDashboardSpinner(true);
       }, 175);
     }
+    if (!dashboardSlowTimerRef.current) {
+      dashboardSlowTimerRef.current = setTimeout(() => setDashboardSlow(true), SLOW_REFRESH_MS);
+    }
 
     const statusRequest = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/status`, { signal: controller.signal });
+        const response = await fetch(`${API_URL}/api/status`, { signal: controller.signal, cache: 'no-store' });
         if (!response.ok) throw new Error('Status request failed');
         const data = await response.json();
         if (controller.signal.aborted) return;
+        const now = Date.now();
         setStatus(data.nepa);
         setPowerSource(data.source);
         setEventsToday(data.events_today ?? 0);
+        setSyncedAt(now);
         localStorage.setItem('nepa-status', data.nepa);
         localStorage.setItem('nepa-source', data.source);
         localStorage.setItem('nepa-events-today', String(data.events_today ?? 0));
+        localStorage.setItem('nepa-synced-at', String(now));
         setStatusError("");
       } catch {
-        if (!controller.signal.aborted) setStatusError("Live status unavailable");
+        if (failed()) {
+          anyFailed = true;
+          setStatusError("Live status unavailable");
+        }
       }
     };
 
     const logsRequest = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/logs`, { signal: controller.signal });
+        const response = await fetch(`${API_URL}/api/logs`, { signal: controller.signal, cache: 'no-store' });
         if (!response.ok) throw new Error('Recent activity request failed');
         const data = await response.json();
         if (controller.signal.aborted) return;
@@ -163,16 +202,29 @@ function App() {
         localStorage.setItem('nepa-logs', JSON.stringify(data));
         setLogsError("");
       } catch {
-        if (!controller.signal.aborted) setLogsError("Recent activity unavailable");
+        if (failed()) {
+          anyFailed = true;
+          setLogsError("Recent activity unavailable");
+        }
       }
     };
 
     await Promise.allSettled([statusRequest(), logsRequest()]);
+    clearTimeout(timeoutId);
     if (requestId === dashboardRequestIdRef.current) {
       if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
       dashboardSpinnerTimerRef.current = null;
+      if (dashboardSlowTimerRef.current) clearTimeout(dashboardSlowTimerRef.current);
+      dashboardSlowTimerRef.current = null;
       dashboardSpinnerVisibleRef.current = false;
       setShowDashboardSpinner(false);
+      setDashboardSlow(false);
+      // Retry soon instead of waiting a full poll interval; a sleeping backend is usually up within a minute.
+      if (anyFailed) {
+        dashboardRetryTimerRef.current = setTimeout(() => {
+          if (document.visibilityState === 'visible') fetchData();
+        }, RETRY_DELAY_MS);
+      }
     }
   }
 
@@ -211,14 +263,26 @@ function App() {
         fetchTodayAnalytics();
       }
     };
+    // Pages restored from the back/forward cache and connections that come back don't always fire visibilitychange.
+    const handlePageShow = (event) => {
+      if (event.persisted) handleVisibilityChange();
+    };
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('online', handleVisibilityChange);
 
     return () => {
       clearInterval(fastInterval);
       clearInterval(slowInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('online', handleVisibilityChange);
       if (dashboardAbortRef.current) dashboardAbortRef.current.abort();
       if (dashboardSpinnerTimerRef.current) clearTimeout(dashboardSpinnerTimerRef.current);
+      if (dashboardSlowTimerRef.current) clearTimeout(dashboardSlowTimerRef.current);
+      if (dashboardRetryTimerRef.current) clearTimeout(dashboardRetryTimerRef.current);
+      dashboardSlowTimerRef.current = null;
+      dashboardRetryTimerRef.current = null;
     };
   }, []);
 
@@ -286,6 +350,9 @@ function App() {
   };
 
   const displayStatus = status || (statusError ? 'UNAVAILABLE' : '--');
+  const dataAge = syncedAt ? Date.now() - syncedAt : null;
+  const statusIsStale = status !== null && (dataAge === null || dataAge > STALE_AFTER_MS);
+  const staleLabel = dataAge === null ? 'your last visit' : formatAge(dataAge);
   const lastUpdate = logs.length > 0
     ? new Date(logs[0].timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
     : '--:--';
@@ -337,7 +404,7 @@ function App() {
                     </div>
                     
                     <p className="text-slate-400 dark:text-slate-500 mb-3 font-black tracking-[0.3em] text-[9px] uppercase relative z-10">Live Connection Status</p>
-                    <h2 className={`text-5xl font-black tracking-tighter transition-all relative z-10 ${
+                    <h2 className={`text-5xl font-black tracking-tighter transition-all relative z-10 ${statusIsStale ? 'opacity-40' : ''} ${
                       displayStatus === 'ON' ? 'text-emerald-500 dark:text-emerald-400 drop-shadow-[0_0_15px_rgba(16,185,129,0.2)]' :
                       displayStatus === 'OFF' ? 'text-slate-400 dark:text-slate-600' :
                       displayStatus === 'UNAVAILABLE' ? 'text-red-500 dark:text-red-400' :
@@ -345,8 +412,14 @@ function App() {
                     }`}>
                       {displayStatus}
                     </h2>
-                    {statusError && status !== null && (
-                      <p role="alert" className="mt-2 text-center text-[9px] font-bold text-red-500 relative z-10">Refresh failed — showing last verified status</p>
+                    {statusError && status !== null ? (
+                      <p role="alert" className="mt-2 text-center text-[9px] font-bold text-red-500 relative z-10">
+                        Refresh failed — showing {statusIsStale ? `status from ${staleLabel}` : 'last verified status'}. Retrying...
+                      </p>
+                    ) : statusIsStale && showDashboardSpinner && (
+                      <p role="status" aria-live="polite" className="mt-2 max-w-[260px] text-center text-[9px] font-bold text-amber-600 dark:text-amber-400 relative z-10">
+                        Showing status from {staleLabel}. {dashboardSlow ? 'Server is waking up — this can take up to a minute.' : 'Updating...'}
+                      </p>
                     )}
                     
                     <div className="mt-6 w-full max-w-[240px] relative z-10">
